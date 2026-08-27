@@ -401,6 +401,223 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
 
 
 @pytest.mark.asyncio
+async def test_submit_root_turn_records_operation_for_complete_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-transcript-operation")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-transcript-operation"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-transcript-operation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"first turn"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after root operation identity assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-transcript-operation",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-root-transcript-operation",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert recorded["parent_response_id"] is None
+    assert json.loads(recorded["request_text"])["input"] == "first turn"
+
+
+@pytest.mark.asyncio
+async def test_submit_root_full_history_hydrates_durable_recovery_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-full-history-hydration")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-full-history-hydration"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-full-history-hydration",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": None,
+                "input": [{"type": "message", "role": "user", "content": "continue"}],
+            }
+        ),
+        transport="http",
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after root hydration assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            lookup_sessions=AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        session_id=session.durable_session_id,
+                        account_id=session.account.id,
+                        owner_epoch=session.durable_owner_epoch,
+                        latest_response_id="resp-hydrated-root",
+                    )
+                ]
+            ),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-full-history-hydration",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-root-full-history-hydration",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert request_state.hard_continuity_anchor is True
+    assert request_state.complete_transcript_recovery_anchor == "resp-hydrated-root"
+    assert recorded["parent_response_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_submit_root_delta_keeps_unverified_injected_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-delta-injected-anchor")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-delta-injected-anchor"
+    session.durable_owner_epoch = 4
+    anchored_text = json.dumps(
+        {
+            "type": "response.create",
+            "previous_response_id": "resp-root-anchor",
+            "input": [{"type": "message", "role": "user", "content": "delta only"}],
+        }
+    )
+    unanchored_text = json.dumps(
+        {
+            "type": "response.create",
+            "previous_response_id": None,
+            "input": [{"type": "message", "role": "user", "content": "delta only"}],
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-delta-injected-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=anchored_text,
+        previous_response_id="resp-root-anchor",
+        hard_continuity_anchor=True,
+        proxy_injected_previous_response_id=True,
+        complete_transcript_recovery_anchor="resp-root-anchor",
+        fresh_upstream_request_text=unanchored_text,
+        fresh_upstream_request_is_retry_safe=False,
+        transport="http",
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after anchor retention assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-delta-injected-anchor",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=anchored_text,
+            queue_limit=8,
+            request_scope_id="scope-root-delta-injected-anchor",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-root-anchor"
+    assert recorded["parent_response_id"] == "resp-root-anchor"
+
+
+@pytest.mark.asyncio
 async def test_submit_abandoned_operation_returns_full_history_recovery_without_upstream_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
