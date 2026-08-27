@@ -3354,6 +3354,7 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         state: str,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
         response_output_items_json: str | None = None,
         response_output_items_complete: bool = False,
@@ -3383,15 +3384,14 @@ class DurableBridgeRepository:
             if response_replay_input_json is not None:
                 values["response_replay_input_json"] = response_replay_input_json
                 values["response_replay_input_complete"] = response_replay_input_complete
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "abandoned",
-                )
-                .values(**values)
-            )
+            conditions = [
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state != "abandoned",
+            ]
+            if expected_recovery_dispatch_count is not None:
+                conditions.append(HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count)
+            result = await self._session.execute(update(HttpBridgeOperationRecord).where(*conditions).values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
