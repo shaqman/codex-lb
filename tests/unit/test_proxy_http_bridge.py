@@ -6609,6 +6609,7 @@ async def test_completed_bridge_operation_materializes_output_items_from_event_s
         operation_parent_response_id=None,
         response_output_items=[],
         response_output_items_complete=False,
+        recovery_replay_turn_count=7,
     )
     session = _make_bridge_session(key_value="materialize-output-items")
     session.durable_session_id = "durable-materialize-output-items"
@@ -6662,6 +6663,7 @@ async def test_completed_bridge_operation_materializes_output_items_from_event_s
     assert replay_snapshot is not None
     assert [item["role"] for item in json.loads(replay_snapshot)] == ["user", "assistant"]
     assert await_args.kwargs["response_replay_input_complete"] is True
+    assert await_args.kwargs["response_replay_input_turn_count"] == 8
 
 
 @pytest.mark.asyncio
