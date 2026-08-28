@@ -222,6 +222,9 @@ class DurableBridgeOperationSnapshot:
     response_output_items_complete: bool = False
     response_replay_input_json: str | None = None
     response_replay_input_complete: bool = False
+    # Number of conversation turns represented by the self-contained replay
+    # snapshot.  A synthetic snapshot turn may embed many older turns.
+    response_replay_input_turn_count: int = 0
     created: bool = False
     rebound: bool = False
     rebound_from_session_id: str | None = None
@@ -266,6 +269,7 @@ class DurableBridgeTranscriptTurn:
     # replay builder does not append the same output a second time when the
     # client resends it as the continuation prefix.
     replay_input_includes_response_output: bool = False
+    represented_turn_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -1903,6 +1907,7 @@ class DurableBridgeRepository:
                     operation.response_output_items_complete = False
                     operation.response_replay_input_json = None
                     operation.response_replay_input_complete = False
+                    operation.response_replay_input_turn_count = 0
                     operation.transcript_version = 0
                     operation.updated_at = utcnow()
                     rebound = True
@@ -2041,6 +2046,7 @@ class DurableBridgeRepository:
             operation.response_output_items_complete = False
             operation.response_replay_input_json = None
             operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
             operation.transcript_version = 0
             if expected_recovery_dispatch_count is not None:
                 # Advance the generation for both complete-transcript and
@@ -2295,6 +2301,7 @@ class DurableBridgeRepository:
             operation.response_output_items_complete = False
             operation.response_replay_input_json = None
             operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
             operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -2353,6 +2360,7 @@ class DurableBridgeRepository:
             operation.response_output_items_complete = False
             operation.response_replay_input_json = None
             operation.response_replay_input_complete = False
+            operation.response_replay_input_turn_count = 0
             operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -2578,11 +2586,12 @@ class DurableBridgeRepository:
         chain make the transcript ineligible for reconstruction.
         """
         turns: list[DurableBridgeTranscriptTurn] = []
+        represented_turns = 0
         visited: set[str] = set()
         total_bytes = 0
         current_response_id: str | None = response_id
         while current_response_id is not None:
-            if current_response_id in visited or len(turns) >= max_turns:
+            if current_response_id in visited or represented_turns >= max_turns:
                 return None
             visited.add(current_response_id)
             operation = await self.get_operation_by_response_id(response_id=current_response_id)
@@ -2612,6 +2621,7 @@ class DurableBridgeRepository:
                     response_output_items_json=operation.response_output_items_json or "[]",
                 )
             )
+            represented_turns += 1
             current_response_id = operation.parent_response_id
         turns.reverse()
         return turns
@@ -2632,11 +2642,12 @@ class DurableBridgeRepository:
         reconstruction path.
         """
         turns: list[DurableBridgeTranscriptTurn] = []
+        represented_turns = 0
         visited: set[str] = set()
         total_bytes = 0
         current_response_id: str | None = response_id
         while current_response_id is not None:
-            if current_response_id in visited or len(turns) >= max_turns:
+            if current_response_id in visited or represented_turns >= max_turns:
                 return None
             visited.add(current_response_id)
             statement = (
@@ -2681,7 +2692,8 @@ class DurableBridgeRepository:
                     snapshot_bytes = len(snapshot.response_replay_input_json.encode("utf-8")) + len(
                         (snapshot.response_output_items_json or "[]").encode("utf-8")
                     )
-                    if len(turns) + 1 > max_turns or total_bytes + snapshot_bytes > max_bytes:
+                    snapshot_turn_count = max(1, snapshot.response_replay_input_turn_count)
+                    if represented_turns + snapshot_turn_count > max_turns or total_bytes + snapshot_bytes > max_bytes:
                         return None
                     synthetic_operation = replace(
                         snapshot,
@@ -2694,6 +2706,7 @@ class DurableBridgeRepository:
                             events=(),
                             response_output_items_json=snapshot.response_output_items_json or "[]",
                             replay_input_includes_response_output=True,
+                            represented_turn_count=snapshot_turn_count,
                         )
                     )
                     turns.reverse()
@@ -2718,6 +2731,7 @@ class DurableBridgeRepository:
                     response_output_items_json=snapshot.response_output_items_json,
                 )
             )
+            represented_turns += 1
             current_response_id = snapshot.parent_response_id
         turns.reverse()
         return turns
@@ -3360,6 +3374,7 @@ class DurableBridgeRepository:
         response_output_items_complete: bool = False,
         response_replay_input_json: str | None = None,
         response_replay_input_complete: bool = False,
+        response_replay_input_turn_count: int = 0,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -3384,6 +3399,7 @@ class DurableBridgeRepository:
             if response_replay_input_json is not None:
                 values["response_replay_input_json"] = response_replay_input_json
                 values["response_replay_input_complete"] = response_replay_input_complete
+                values["response_replay_input_turn_count"] = max(0, int(response_replay_input_turn_count))
             conditions = [
                 HttpBridgeOperationRecord.operation_id == operation_id,
                 HttpBridgeOperationRecord.session_id == session_id,
@@ -4484,6 +4500,7 @@ def _to_operation_snapshot(
         response_output_items_complete=bool(row.response_output_items_complete),
         response_replay_input_json=row.response_replay_input_json,
         response_replay_input_complete=bool(row.response_replay_input_complete),
+        response_replay_input_turn_count=int(getattr(row, "response_replay_input_turn_count", 0) or 0),
         created=created,
         rebound=rebound,
         rebound_from_session_id=rebound_from_session_id,
