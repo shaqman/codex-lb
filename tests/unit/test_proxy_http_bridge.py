@@ -6475,7 +6475,118 @@ async def test_http_bridge_incomplete_event_terminalizes_operation(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
+async def test_http_bridge_replay_terminal_before_created_preserves_downstream_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-replay-terminal-before-created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="replay-terminal-before-created",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp-replacement",
+                    "object": "response",
+                    "status": "incomplete",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert request_state.response_id == "resp-replacement"
+    assert request_state not in session.pending_requests
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal_payload = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.incomplete"
+    terminal_response = terminal_payload.get("response")
+    assert isinstance(terminal_response, dict)
+    assert terminal_response["id"] == "resp-client-visible"
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_replay_error_before_created_preserves_downstream_response_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-replay-error-before-created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible-error",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="replay-error-before-created",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 502,
+                "response": {"id": "resp-replacement-error"},
+                "error": {
+                    "type": "server_error",
+                    "code": "upstream_error",
+                    "message": "replacement failed",
+                },
+            }
+        ),
+    )
+
+    assert request_state.response_id == "resp-replacement-error"
+    assert request_state not in session.pending_requests
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal_payload = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal_payload, dict)
+    assert terminal_payload["type"] == "response.failed"
+    terminal_response = terminal_payload.get("response")
+    assert isinstance(terminal_response, dict)
+    assert terminal_response["id"] == "resp-client-visible-error"
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_batched_terminal_delivery_precedes_snapshot_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -6490,7 +6601,7 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-batched-terminal-order",
-        response_id="resp-batched-terminal-order",
+        response_id="resp-batched-terminal-upstream",
         model="gpt-5.6-sol",
         service_tier=None,
         reasoning_effort=None,
@@ -6500,6 +6611,7 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         transport="http",
         skip_request_log=True,
     )
+    request_state.replay_downstream_response_id = "resp-batched-terminal-visible"
     request_state.operation_id = "op-batched-terminal-order"
     session = _make_bridge_session(
         key_value="batched-terminal-order",
@@ -6509,15 +6621,20 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     session.durable_session_id = "durable-batched-terminal-order"
     session.durable_owner_epoch = 1
     order: list[str] = []
+    persisted_response_ids: list[str | None] = []
 
     async def update_state(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+        del args
+        assert request_state.event_queue is not None
+        assert request_state.event_queue.qsize() == 2
         order.append("state")
+        persisted_response_ids.append(kwargs["response_id"])
 
     async def append_terminal_event(*args: Any, **kwargs: Any) -> bool:
         del args
         assert kwargs["session_id"] == session.durable_session_id
         order.append("terminal")
+        persisted_response_ids.append(kwargs["response_id"])
         return True
 
     monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_state)
@@ -6533,9 +6650,14 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         'data: {"type":"response.completed"}\n\n',
         terminal=True,
         terminal_state="completed",
+        terminal_event_queue=request_state.event_queue,
     )
 
-    assert order == ["terminal"]
+    assert order == ["terminal", "state"]
+    assert persisted_response_ids == [
+        "resp-batched-terminal-upstream",
+        "resp-batched-terminal-upstream",
+    ]
 
 
 @pytest.mark.asyncio
