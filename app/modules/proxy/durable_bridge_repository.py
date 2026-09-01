@@ -2436,6 +2436,7 @@ class DurableBridgeRepository:
         rebound_from_account_id: str | None = None,
         rebound_from_model: str | None = None,
         rebound_from_parent_response_id: str | None = None,
+        expected_recovery_dispatch_count: int | None = None,
     ) -> bool:
         """Undo an operation transition that never reached upstream."""
         async with sqlite_writer_section():
@@ -2456,6 +2457,14 @@ class DurableBridgeRepository:
                     HttpBridgeOperationRecord.state == "submitted",
                     HttpBridgeOperationRecord.response_id.is_(None),
                     HttpBridgeOperationRecord.event_bytes == 0,
+                    *(
+                        [
+                            HttpBridgeOperationRecord.recovery_dispatch_count
+                            == expected_recovery_dispatch_count + 1
+                        ]
+                        if expected_recovery_dispatch_count is not None
+                        else []
+                    ),
                 )
                 .with_for_update()
             )
@@ -2468,6 +2477,11 @@ class DurableBridgeRepository:
             if restore_rebound:
                 operation.state = "failed"
                 operation.event_spool_complete = False
+                if expected_recovery_dispatch_count is not None:
+                    # Rebind increments the generation before dispatch. A
+                    # pre-dispatch rollback must refund that exact claim so a
+                    # later retry can claim the same generation safely.
+                    operation.recovery_dispatch_count = expected_recovery_dispatch_count
                 if rebound_from_session_id is not None:
                     operation.session_id = rebound_from_session_id
                     operation.account_id = rebound_from_account_id
