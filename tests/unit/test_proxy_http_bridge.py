@@ -7668,6 +7668,7 @@ async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_
         )
     )
     rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
@@ -7675,6 +7676,9 @@ async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_
             rebind_operation_for_complete_transcript=rebind_operation,
             rollback_operation_before_dispatch=rollback_operation,
         ),
+    )
+    service._http_bridge_operation_event_batcher = SimpleNamespace(
+        rollback_fence_operation=rollback_fence_operation,
     )
     monkeypatch.setattr(
         http_bridge_upstream_events_module,
@@ -7712,6 +7716,7 @@ async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_
     assert rollback_operation.await_args is not None
     assert rollback_operation.await_args.kwargs["restore_rebound"] is True
     assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    rollback_fence_operation.assert_awaited_once_with(operation_id="op-stale", recovery_dispatch_count=0)
     assert request_state not in session.pending_requests
     assert session.queued_request_count == 0
     assert request_state.operation_registered is False
@@ -8312,6 +8317,7 @@ async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatc
         )
     )
     rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
@@ -8319,6 +8325,9 @@ async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatc
             rebind_operation_for_complete_transcript=rebind_operation,
             rollback_operation_before_dispatch=rollback_operation,
         ),
+    )
+    service._http_bridge_operation_event_batcher = SimpleNamespace(
+        rollback_fence_operation=rollback_fence_operation,
     )
     monkeypatch.setattr(
         http_bridge_upstream_events_module,
@@ -8351,6 +8360,7 @@ async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatc
     assert rollback_operation.await_args is not None
     assert rollback_operation.await_args.kwargs["restore_rebound"] is True
     assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    rollback_fence_operation.assert_awaited_once_with(operation_id="op-unsafe-partial", recovery_dispatch_count=0)
     assert request_state not in session.pending_requests
     assert session.queued_request_count == 0
     assert request_state.operation_registered is False
@@ -27201,6 +27211,50 @@ async def test_cleanup_http_bridge_submit_interruption_clears_restored_operation
     assert request_state.operation_id is None
     assert request_state.operation_fingerprint is None
     assert request_state.operation_parent_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_fence() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    rollback_operation = AsyncMock(return_value=True)
+    rollback_fence_operation = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(rollback_operation_before_dispatch=rollback_operation),
+    )
+    service._http_bridge_operation_event_batcher = SimpleNamespace(
+        rollback_fence_operation=rollback_fence_operation,
+    )
+    session = _make_bridge_session(key_value="restore-recovery-event-fence")
+    session.durable_session_id = "durable-restore-recovery-event-fence"
+    session.durable_owner_epoch = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-restore-recovery-event-fence",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        operation_id="operation-rebound-fence",
+        operation_fingerprint="fingerprint-rebound-fence",
+        operation_registered=True,
+        operation_rebound=True,
+        operation_recovery_expected_generation=2,
+    )
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    rollback_operation.assert_awaited_once()
+    rollback_fence_operation.assert_awaited_once_with(
+        operation_id="operation-rebound-fence",
+        recovery_dispatch_count=2,
+    )
 
 
 @pytest.mark.asyncio
