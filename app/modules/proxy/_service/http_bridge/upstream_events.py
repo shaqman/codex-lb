@@ -1616,8 +1616,20 @@ async def _try_complete_transcript_recovery(
             )
             return False
 
-    async def recovery_claimed_by_concurrent_call() -> bool:
+    async def recovery_claimed_by_concurrent_call(*, include_durable_lookup: bool = True) -> bool:
         """Detect a competing recovery that won the durable CAS claim."""
+        # A local generation advance is unambiguous evidence that another
+        # recovery task updated this request state while we were suspended.
+        # A durable generation advance alone is ambiguous after a database
+        # connection loss: our own rebind may have committed before its result
+        # was delivered, so do not treat that as a concurrent winner on the
+        # exception path unless the in-memory request was advanced too.
+        if getattr(request_state, "operation_attempt_generation", 0) > expected_recovery_dispatch_count and getattr(
+            request_state, "operation_registered", False
+        ):
+            return True
+        if not include_durable_lookup:
+            return False
         lookup_sessions = getattr(getattr(service, "_durable_bridge", None), "lookup_sessions", None)
         if not callable(lookup_sessions) or session.durable_session_id is None:
             return False
@@ -1663,7 +1675,7 @@ async def _try_complete_transcript_recovery(
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
     except Exception:
-        if await recovery_claimed_by_concurrent_call():
+        if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
             if not await fence_rebound_operation():
                 return False
             _log_http_bridge_event(
@@ -1676,6 +1688,11 @@ async def _try_complete_transcript_recovery(
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             return True
+        # The rebind may have committed before its response was lost. Roll it
+        # back under the owner fence instead of mistaking our own generation
+        # advance for a competing recovery and suppressing the retry.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(None)
         logger.warning(
             "Complete HTTP bridge transcript recovery operation rebind failed request_id=%s",
             request_state.request_id,
@@ -2044,10 +2061,16 @@ async def _try_unsafe_partial_transcript_recovery(
             )
             return False
 
-    async def recovery_claimed_by_concurrent_call() -> bool:
+    async def recovery_claimed_by_concurrent_call(*, include_durable_lookup: bool = True) -> bool:
         # A CAS miss is expected when the other recovery task won the durable
         # claim. Never clear its shared in-memory state; doing so would detach
         # the winning retry from its operation fence before terminal settle.
+        if getattr(request_state, "operation_attempt_generation", 0) > expected_recovery_dispatch_count and getattr(
+            request_state, "operation_registered", False
+        ):
+            return True
+        if not include_durable_lookup:
+            return False
         get_session_by_id = getattr(getattr(service, "_durable_bridge", None), "get_session_by_id", None)
         if not callable(get_session_by_id) or session.durable_session_id is None:
             return False
@@ -2093,7 +2116,7 @@ async def _try_unsafe_partial_transcript_recovery(
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
     except Exception:
-        if await recovery_claimed_by_concurrent_call():
+        if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
             if not await fence_rebound_operation():
                 return False
             _log_http_bridge_event(
@@ -2106,6 +2129,8 @@ async def _try_unsafe_partial_transcript_recovery(
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             return True
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(None)
         logger.warning(
             "Unsafe HTTP bridge partial transcript recovery operation rebind failed request_id=%s",
             getattr(request_state, "request_id", None),
