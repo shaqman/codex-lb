@@ -1671,8 +1671,8 @@ async def _try_complete_transcript_recovery(
             and getattr(current_operation, "recovery_dispatch_count", 0) > expected_recovery_dispatch_count
         )
 
-    try:
-        rebound_operation = await rebind_operation(
+    rebind_task = asyncio.create_task(
+        rebind_operation(
             operation_id=operation_id,
             session_id=session.durable_session_id,
             instance_id=settings.http_responses_session_bridge_instance_id,
@@ -1682,12 +1682,13 @@ async def _try_complete_transcript_recovery(
             request_text=replay_text,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
+    )
+    try:
+        rebound_operation, rebind_cancellation = await _await_task_deferring_cancellation(rebind_task)
     except asyncio.CancelledError:
-        # The rebind may have committed before cancellation was delivered.
-        # Reconcile it under a shield before propagating cancellation so the
-        # durable row and in-memory event fence cannot be stranded.
-        with anyio.CancelScope(shield=True):
-            await rollback_rebound_operation(None)
+        # If the rebind task itself was cancelled, it did not return a
+        # committed snapshot that can prove ownership of a durable mutation.
+        # Do not compensate another recovery's generation without that proof.
         raise
     except Exception:
         if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
@@ -1721,6 +1722,14 @@ async def _try_complete_transcript_recovery(
         request_state.operation_dispatched = False
         request_state.operation_recovery_claimed = False
         return False
+    if rebind_cancellation is not None:
+        # A completed snapshot is the ownership proof for compensation. A
+        # ``None`` result means this call lost the durable CAS to another
+        # recovery and must not roll the winner back.
+        if rebound_operation is not None and bool(getattr(rebound_operation, "rebound", False)):
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rebound_operation)
+        raise rebind_cancellation
     if rebound_operation is None and await recovery_claimed_by_concurrent_call():
         if not await fence_rebound_operation():
             return False
@@ -2128,8 +2137,8 @@ async def _try_unsafe_partial_transcript_recovery(
             and getattr(current_operation, "state", None) in {"submitted", "acknowledged"}
         )
 
-    try:
-        rebound_operation = await rebind_operation(
+    rebind_task = asyncio.create_task(
+        rebind_operation(
             operation_id=operation_id,
             session_id=session.durable_session_id,
             instance_id=settings.http_responses_session_bridge_instance_id,
@@ -2140,12 +2149,13 @@ async def _try_unsafe_partial_transcript_recovery(
             allow_acknowledged=True,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
         )
+    )
+    try:
+        rebound_operation, rebind_cancellation = await _await_task_deferring_cancellation(rebind_task)
     except asyncio.CancelledError:
-        # The rebind may have committed before cancellation was delivered.
-        # Reconcile it under a shield before propagating cancellation so the
-        # durable row and in-memory event fence cannot be stranded.
-        with anyio.CancelScope(shield=True):
-            await rollback_rebound_operation(None)
+        # If the rebind task itself was cancelled, it did not return a
+        # committed snapshot that can prove ownership of a durable mutation.
+        # Do not compensate another recovery's generation without that proof.
         raise
     except Exception:
         if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
@@ -2176,6 +2186,14 @@ async def _try_unsafe_partial_transcript_recovery(
         request_state.operation_dispatched = False
         request_state.operation_recovery_claimed = False
         return False
+    if rebind_cancellation is not None:
+        # A completed snapshot is the ownership proof for compensation. A
+        # ``None`` result means this call lost the durable CAS to another
+        # recovery and must not roll the winner back.
+        if rebound_operation is not None and bool(getattr(rebound_operation, "rebound", False)):
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rebound_operation)
+        raise rebind_cancellation
     if rebound_operation is None:
         if await recovery_claimed_by_concurrent_call():
             if not await fence_rebound_operation():
