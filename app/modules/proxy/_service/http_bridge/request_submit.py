@@ -4827,7 +4827,8 @@ class _HTTPBridgeRequestSubmitMixin:
         def retryability_baseline_is_unchanged() -> bool:
             return (
                 request_state_retryability_baseline is not None
-                and session_retryability_baseline == (
+                and session_retryability_baseline
+                == (
                     session.last_upstream_close_code,
                     session.last_upstream_close_generation,
                 )
@@ -5126,10 +5127,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     and not request_state.draining_until_terminal
                     and _http_bridge_request_counts_against_queue(request_state)
                     and (
-                        (
-                            request_state_was_retryable_before_prepare
-                            and retryability_baseline_is_unchanged()
-                        )
+                        (request_state_was_retryable_before_prepare and retryability_baseline_is_unchanged())
                         or request_is_retryable(request_state)
                     )
                 )
