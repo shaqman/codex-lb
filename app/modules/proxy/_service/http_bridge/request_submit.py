@@ -1413,8 +1413,15 @@ class _HTTPBridgeRequestSubmitMixin:
         ):
             return None, None
         expected_text = _text_without_account_installation_id(_text_without_operation_id(text_data))
+        parked_recovery_enabled = bool(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_parked_recovery_enabled",
+                False,
+            )
+        )
 
-        if callable(get_root_unknown):
+        if callable(get_root_unknown) and not parked_recovery_enabled:
             operation = await _call_with_supported_optional_kwargs(
                 get_root_unknown,
                 optional_kwargs={"api_key_scope": api_key_scope},
@@ -1443,13 +1450,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # The session may have advanced after this operation became UNKNOWN.
         # When explicitly enabled, inspect a bounded set of recent UNKNOWN
         # turns and accept only one exact body match.
-        if not bool(
-            getattr(
-                _service_get_settings(),
-                "http_responses_session_bridge_parked_recovery_enabled",
-                False,
-            )
-        ):
+        if not parked_recovery_enabled:
             return None, None
         if not callable(get_recent_unknown):
             return None, None
@@ -5270,6 +5271,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.response_output_items = []
         request_state.response_output_items_by_index = {}
         request_state.response_output_item_added_indexes = set()
+        request_state.response_output_item_added_identities = {}
         request_state.response_output_items_event_invalid = False
         request_state.response_output_items_complete = False
         request_state.upstream_model_output_seen = False
