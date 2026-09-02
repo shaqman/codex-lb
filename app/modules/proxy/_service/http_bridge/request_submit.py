@@ -1251,10 +1251,16 @@ class _HTTPBridgeRequestSubmitMixin:
             "get_unique_unknown_operation_for_latest_parent",
             None,
         )
+        get_root_unknown = getattr(
+            self._durable_bridge,
+            "get_unique_unknown_operation_for_root",
+            None,
+        )
         get_recent_unknown = getattr(self._durable_bridge, "get_recent_unknown_operations", None)
         if (
             not callable(get_operation_by_fingerprint)
             and not callable(get_latest_parent_unknown)
+            and not callable(get_root_unknown)
             and not callable(get_recent_unknown)
         ):
             return False, "operation_ledger_unavailable"
@@ -1286,6 +1292,8 @@ class _HTTPBridgeRequestSubmitMixin:
             return False, "operation_session_mismatch"
         operation_state = getattr(operation.state, "value", operation.state)
         if operation_state == "unknown":
+            if fallback_kind == "root":
+                return True, "operation_unknown_root"
             if fallback_kind == "latest_parent":
                 return True, "operation_unknown_latest_parent"
             if fallback_kind == "recent_parent":
@@ -1356,6 +1364,11 @@ class _HTTPBridgeRequestSubmitMixin:
             "get_unique_unknown_operation_for_latest_parent",
             None,
         )
+        get_root_unknown = getattr(
+            self._durable_bridge,
+            "get_unique_unknown_operation_for_root",
+            None,
+        )
         get_recent_unknown = getattr(self._durable_bridge, "get_recent_unknown_operations", None)
         operation = None
         if callable(get_operation_by_fingerprint):
@@ -1399,6 +1412,21 @@ class _HTTPBridgeRequestSubmitMixin:
             or session.durable_session_id is None
         ):
             return None, None
+        expected_text = _text_without_account_installation_id(_text_without_operation_id(text_data))
+
+        if callable(get_root_unknown):
+            operation = await _call_with_supported_optional_kwargs(
+                get_root_unknown,
+                optional_kwargs={"api_key_scope": api_key_scope},
+                session_id=session.durable_session_id,
+                model=request_state.model or session.request_model,
+            )
+            operation_text = getattr(operation, "request_text", None)
+            if isinstance(operation_text, str) and operation_text:
+                recorded_text = _text_without_account_installation_id(_text_without_operation_id(operation_text))
+                if expected_text == recorded_text:
+                    return operation, "root"
+
         if callable(get_latest_parent_unknown):
             operation = await _call_with_supported_optional_kwargs(
                 get_latest_parent_unknown,
@@ -1407,7 +1435,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 model=request_state.model or session.request_model,
             )
         operation_text = getattr(operation, "request_text", None)
-        expected_text = _text_without_account_installation_id(_text_without_operation_id(text_data))
         if isinstance(operation_text, str) and operation_text:
             recorded_text = _text_without_account_installation_id(_text_without_operation_id(operation_text))
             if expected_text == recorded_text:
