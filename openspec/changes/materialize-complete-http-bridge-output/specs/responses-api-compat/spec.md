@@ -37,6 +37,10 @@ UNKNOWN-operation claim. If cancellation arrives during a successful claim,
 the caller MUST restore UNKNOWN and refund its recovery generation before
 propagating cancellation without dispatching a replacement request.
 
+Initial admission claims and local replay journal claims MUST also defer
+cancellation until their durable result and in-memory ownership are recorded.
+A committed pre-dispatch claim MUST be refunded on cancellation.
+
 Grouped terminal delivery MUST preserve cancellation received while awaiting
 sibling delivery barriers, including the early barrier after a successful
 terminal append. Cancellation MUST propagate after the delivery barrier completes.

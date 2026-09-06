@@ -2358,15 +2358,20 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "HTTP response recovery could not claim the previous operation; retry the request.",
                             ),
                         )
-                    claimed = await _call_with_supported_optional_kwargs(
-                        claim_unknown_operation,
-                        optional_kwargs={"max_recovery_dispatches": 1} if one_shot_recovery else {},
-                        operation_id=operation.operation_id,
-                        session_id=session.durable_session_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=session.durable_owner_epoch,
+                    claim_task = asyncio.ensure_future(
+                        _call_with_supported_optional_kwargs(
+                            claim_unknown_operation,
+                            optional_kwargs={"max_recovery_dispatches": 1} if one_shot_recovery else {},
+                            operation_id=operation.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                        )
                     )
+                    claimed, claim_cancellation = await _await_task_deferring_cancellation(claim_task)
                     if not claimed:
+                        if claim_cancellation is not None:
+                            raise claim_cancellation
                         session.closed = True
                         session.upstream_control.reconnect_requested = True
                         session.upstream_control.retire_after_drain = True
@@ -2387,6 +2392,18 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.operation_id = operation.operation_id
                     request_state.operation_fingerprint = operation_fingerprint
                     request_state.operation_registered = True
+                    if claim_cancellation is not None:
+                        cleanup_task = asyncio.create_task(
+                            self._cleanup_http_bridge_submit_interruption(
+                                session,
+                                request_state=request_state,
+                                gate_acquired=False,
+                                request_enqueued=False,
+                                counted_in_queue=False,
+                            )
+                        )
+                        await _await_task_deferring_cancellation(cleanup_task)
+                        raise claim_cancellation
                 else:
                     # A prior dispatch with the same parent and body may have
                     # been accepted by upstream, or another request may still

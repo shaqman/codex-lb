@@ -758,6 +758,88 @@ async def test_submit_root_delta_keeps_unverified_injected_anchor(
 
 
 @pytest.mark.asyncio
+async def test_submit_unknown_operation_cancelled_during_claim_refunds_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="cancelled-operation-claim")
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.durable_session_id = "durable-cancelled-claim"
+    session.durable_owner_epoch = 4
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-cancelled-claim",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+        previous_response_id="resp-parent",
+        request_text='{"type":"response.create","input":"retry"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    operation = SimpleNamespace(
+        operation_id="operation-cancelled-claim",
+        session_id=session.durable_session_id,
+        state="unknown",
+        created=False,
+        event_spool_complete=False,
+        response_id=None,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def claim(**_kwargs: object) -> bool:
+        started.set()
+        await release.wait()
+        return True
+
+    mark_unknown = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=operation),
+            get_operation=AsyncMock(return_value=operation),
+            record_operation=AsyncMock(return_value=operation),
+            claim_unknown_operation_for_recovery=claim,
+            mark_operation_unknown=mark_unknown,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    task = asyncio.create_task(
+        service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=state,
+            text_data=state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="cancelled-claim",
+            owned_unanchored_handoff=False,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    mark_unknown.assert_awaited_once()
+    assert mark_unknown.await_args is not None
+    assert mark_unknown.await_args.kwargs["restore_recovery_dispatch_claim"] is True
+    assert mark_unknown.await_args.kwargs["operation_id"] == operation.operation_id
+    assert not state.operation_recovery_claimed
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_submit_abandoned_operation_returns_full_history_recovery_without_upstream_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -37299,8 +37381,10 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_journal_claim", [False, True])
 async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without_continuity_provenance(
     monkeypatch: pytest.MonkeyPatch,
+    cancel_during_journal_claim: bool,
 ) -> None:
     """A session-injected anchor must not let the fresh replay switch accounts."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -37399,6 +37483,23 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         },
     )
     stream_attempts: list[tuple[str | None, str | None, str]] = []
+    prepared_states: list[proxy_service._WebSocketRequestState] = []
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    rollback_started = asyncio.Event()
+    release_rollback = asyncio.Event()
+
+    async def delayed_claim(**_kwargs: object) -> bool:
+        claim_started.set()
+        await release_claim.wait()
+        return True
+
+    async def delayed_rollback(**_kwargs: object) -> bool:
+        rollback_started.set()
+        await release_rollback.wait()
+        return True
+
+    rollback_claim = AsyncMock(side_effect=delayed_rollback)
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -37420,6 +37521,12 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
             operation_fingerprint="fingerprint-soft-owner-replay",
             transport="http",
         )
+        if cancel_during_journal_claim:
+            request_state.recovery_attempt_fingerprint = "journal-soft-owner-replay"
+            request_state.recovery_attempt_session_id = lookup.session_id
+            request_state.recovery_attempt_owner_epoch = lookup.owner_epoch
+            request_state.recovery_attempt_dispatched = True
+        prepared_states.append(request_state)
         return request_state, text_data
 
     async def fake_stream_events(
@@ -37461,6 +37568,16 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=lookup))
     monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", AsyncMock(return_value=True))
+    if cancel_during_journal_claim:
+        monkeypatch.setattr(
+            service._durable_bridge,
+            "record_recovery_attempt",
+            AsyncMock(
+                return_value=SimpleNamespace(state="unknown", response_id=None, request_id="req-soft-owner-replay")
+            ),
+        )
+        monkeypatch.setattr(service._durable_bridge, "mark_recovery_attempt_replayed", delayed_claim)
+        monkeypatch.setattr(service._durable_bridge, "rollback_recovery_attempt_replayed", rollback_claim)
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -37475,23 +37592,44 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         lambda _session, _request_state: True,
     )
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={},
-            codex_session_affinity=False,
-            propagate_http_errors=True,
-            openai_cache_affinity=True,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=1800.0,
-            max_sessions=8,
-            queue_limit=4,
-        )
-    ]
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=True,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
+
+    if cancel_during_journal_claim:
+        task = asyncio.create_task(collect())
+        await asyncio.wait_for(claim_started.wait(), timeout=5)
+        task.cancel()
+        release_claim.set()
+        await asyncio.wait_for(rollback_started.wait(), timeout=5)
+        task.cancel()
+        release_rollback.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        rollback_claim.assert_awaited_once()
+        assert rollback_claim.await_args is not None
+        assert rollback_claim.await_args.kwargs["request_fingerprint"] == "journal-soft-owner-replay"
+        assert not prepared_states[0].recovery_attempt_claimed
+        assert len(stream_attempts) == 1
+        assert get_or_create.await_count == 1
+        return
+
+    chunks = await collect()
 
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert stream_attempts == [

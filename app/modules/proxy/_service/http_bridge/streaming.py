@@ -3401,17 +3401,17 @@ class _HTTPBridgeStreamingMixin:
                 try:
                     # A cancellation must not interrupt the compensating
                     # transaction; the caller re-raises it after rollback.
-                    with anyio.CancelScope(shield=True):
-                        rolled_back = bool(
-                            await rollback_recovery_attempt(
-                                session_id=session_id,
-                                api_key_id=api_key_id,
-                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                                owner_epoch=owner_epoch,
-                                request_fingerprint=request_fingerprint,
-                            )
+                    rollback_task = asyncio.ensure_future(
+                        rollback_recovery_attempt(
+                            session_id=session_id,
+                            api_key_id=api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=owner_epoch,
+                            request_fingerprint=request_fingerprint,
                         )
-                    return rolled_back
+                    )
+                    rolled_back, _ = await _await_task_deferring_cancellation(rollback_task)
+                    return bool(rolled_back)
                 except BaseException:
                     logger.warning(
                         "Failed to roll back claimed HTTP bridge recovery checkpoint request_id=%s",
@@ -3495,13 +3495,16 @@ class _HTTPBridgeStreamingMixin:
                         ),
                     )
                 try:
-                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
-                        session_id=recovery_session_id,
-                        api_key_id=bridge_session_key.api_key_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=recovery_owner_epoch,
-                        request_fingerprint=request_state.recovery_attempt_fingerprint,
+                    claim_task = asyncio.create_task(
+                        self._durable_bridge.mark_recovery_attempt_replayed(
+                            session_id=recovery_session_id,
+                            api_key_id=bridge_session_key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_owner_epoch,
+                            request_fingerprint=request_state.recovery_attempt_fingerprint,
+                        )
                     )
+                    marked, claim_cancellation = await _await_task_deferring_cancellation(claim_task)
                 except Exception as exc:
                     raise ProxyResponseError(
                         502,
@@ -3511,6 +3514,8 @@ class _HTTPBridgeStreamingMixin:
                         ),
                     ) from exc
                 if not marked:
+                    if claim_cancellation is not None:
+                        raise claim_cancellation
                     raise ProxyResponseError(
                         502,
                         openai_error(
@@ -3519,6 +3524,8 @@ class _HTTPBridgeStreamingMixin:
                         ),
                     )
                 request_state.recovery_attempt_claimed = True
+                if claim_cancellation is not None:
+                    raise claim_cancellation
 
             async def reset_previous_response_recovery_operation_spool(
                 recovery_session: "_HTTPBridgeSession",
@@ -4125,8 +4132,12 @@ class _HTTPBridgeStreamingMixin:
                 recovery_was_already_claimed = request_state.recovery_attempt_claimed
                 recovery_claimed_here = False
                 try:
-                    await claim_recovery_attempt_for_local_replay()
-                    recovery_claimed_here = request_state.recovery_attempt_claimed and not recovery_was_already_claimed
+                    try:
+                        await claim_recovery_attempt_for_local_replay()
+                    finally:
+                        recovery_claimed_here = (
+                            request_state.recovery_attempt_claimed and not recovery_was_already_claimed
+                        )
                     await self._reset_http_bridge_session_after_local_terminal_error(
                         session,
                         error_code="stream_incomplete",
@@ -4199,8 +4210,12 @@ class _HTTPBridgeStreamingMixin:
                 recovery_was_already_claimed = request_state.recovery_attempt_claimed
                 recovery_claimed_here = False
                 try:
-                    await claim_recovery_attempt_for_local_replay()
-                    recovery_claimed_here = request_state.recovery_attempt_claimed and not recovery_was_already_claimed
+                    try:
+                        await claim_recovery_attempt_for_local_replay()
+                    finally:
+                        recovery_claimed_here = (
+                            request_state.recovery_attempt_claimed and not recovery_was_already_claimed
+                        )
                     retry_preferred_account_id = request_state.preferred_account_id or session.account.id
                     bridge_session_key = _HTTPBridgeSessionKey(
                         "internal_request_parallel",
