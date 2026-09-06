@@ -37587,7 +37587,9 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         )
         if len(stream_attempts) == 1:
             assert request_state.previous_response_id == "resp-stale-anchor", stream_attempts
+            request_state.operation_recovery_expected_generation = 7
             raise stale_rejection
+        assert request_state.operation_recovery_expected_generation == 7
         yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(

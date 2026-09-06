@@ -686,6 +686,44 @@ async def test_collect_responses_payload_rejects_conflicting_terminal_output() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed_type,terminal_type", [("function_call", "message"), ("message", "reasoning")])
+async def test_public_responses_rejects_terminal_output_type_mismatch(
+    streamed_type: str,
+    terminal_type: str,
+) -> None:
+    events = [
+        {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {"id": "resp_1", "status": "in_progress", "output": []},
+        },
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {"id": "item_1", "type": streamed_type},
+        },
+        {
+            "type": "response.completed",
+            "sequence_number": 2,
+            "response": {"id": "resp_1", "status": "completed", "output": [{"id": "item_1", "type": terminal_type}]},
+        },
+    ]
+    wire = ["data: " + json.dumps(event) + "\n\n" for event in events]
+    result = await proxy_api_module._collect_responses_payload(_iter_blocks(*wire))
+    assert result.model_dump(mode="json", exclude_none=True)["error"]["code"] == "invalid_output_item"
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(*wire))]
+    terminal = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert terminal is not None
+    assert terminal["type"] == "response.failed"
+    response = terminal["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "invalid_output_item"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_rejects_terminal_identity_mismatch() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(

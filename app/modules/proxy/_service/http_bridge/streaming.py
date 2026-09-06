@@ -4506,6 +4506,9 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
                 retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
+                retry_request_state.operation_recovery_expected_generation = (
+                    request_state.operation_recovery_expected_generation
+                )
                 retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 # An anchored recovery replays the proxy's own anchor, so the

@@ -456,6 +456,17 @@ class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                             "status": "completed",
                             "output": [
                                 {
+                                    "id": "ctc_shell",
+                                    "type": "custom_tool_call",
+                                    "status": "completed",
+                                    "call_id": "call_custom_shell",
+                                    "name": "shell",
+                                    "input": "pwd",
+                                }
+                            ]
+                            if len(self.sent_text) == 1
+                            else [
+                                {
                                     "type": "message",
                                     "role": "assistant",
                                     "content": [{"type": "output_text", "text": "OK"}],
