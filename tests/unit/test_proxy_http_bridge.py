@@ -10067,6 +10067,67 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
 
 
 @pytest.mark.asyncio
+async def test_successful_terminal_append_preserves_early_delivery_barrier_cancellation() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    state = proxy_service._WebSocketRequestState(
+        request_id="barrier-cancel",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        operation_id="op-barrier-cancel",
+    )
+    session = _make_bridge_session(key_value="barrier-cancel")
+    session.durable_session_id = "durable-barrier-cancel"
+    session.durable_owner_epoch = 1
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=AsyncMock(return_value=TerminalOperationEventAppendResult(persisted=True)),
+        ),
+    )
+    barrier_started = asyncio.Event()
+    release_barrier = asyncio.Event()
+    barrier_finished = asyncio.Event()
+
+    async def delivery_barrier() -> None:
+        barrier_started.set()
+        await release_barrier.wait()
+        barrier_finished.set()
+
+    block = 'data: {"type":"response.completed"}\n\n'
+    task = asyncio.create_task(
+        http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            session,
+            state,
+            block,
+            terminal=True,
+            terminal_state="completed",
+            terminal_event_queue=queue,
+            terminal_delivery_barrier=delivery_barrier,
+        )
+    )
+    try:
+        await asyncio.wait_for(barrier_started.wait(), timeout=2)
+        assert queue.get_nowait() == block
+        assert queue.get_nowait() is None
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_barrier.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert barrier_finished.is_set()
+        assert queue.empty()
+    finally:
+        release_barrier.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_failure_defers_cancellation_through_delivery_claim() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()

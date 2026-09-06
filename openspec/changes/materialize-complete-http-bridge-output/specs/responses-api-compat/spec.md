@@ -37,6 +37,10 @@ UNKNOWN-operation claim. If cancellation arrives during a successful claim,
 the caller MUST restore UNKNOWN and refund its recovery generation before
 propagating cancellation without dispatching a replacement request.
 
+Grouped terminal delivery MUST preserve cancellation received while awaiting
+sibling delivery barriers, including the early barrier after a successful
+terminal append. Cancellation MUST propagate after the delivery barrier completes.
+
 A terminal event MUST remain bound to its original session, instance, and
 owner epoch while pending events drain. A same-generation ownership handoff
 MUST NOT let the predecessor append its terminal event with successor credentials

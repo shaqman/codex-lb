@@ -850,7 +850,8 @@ async def _persist_http_bridge_operation_event(
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
                 if terminal_delivery_barrier is not None:
-                    await release_terminal_delivery_barrier()
+                    barrier_cancellation = await release_terminal_delivery_barrier()
+                    deferred_cancellation = deferred_cancellation or barrier_cancellation
             if persisted and terminal_state is not None and _http_bridge_transcript_recovery_enabled():
                 # The terminal append is the spool completeness fence. Only
                 # after it commits may the collected output and replay
