@@ -3398,18 +3398,30 @@ class _HTTPBridgeStreamingMixin:
                     or request_fingerprint is None
                 ):
                     return False, None
+
+                async def rollback_checkpoint() -> bool:
+                    try:
+                        return bool(
+                            await rollback_recovery_attempt(
+                                session_id=session_id,
+                                api_key_id=api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=owner_epoch,
+                                request_fingerprint=request_fingerprint,
+                            )
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to roll back claimed HTTP bridge recovery checkpoint request_id=%s",
+                            request_state.request_id,
+                            exc_info=True,
+                        )
+                        return False
+
                 try:
                     # A cancellation must not interrupt the compensating
                     # transaction; the caller re-raises it after rollback.
-                    rollback_task = asyncio.ensure_future(
-                        rollback_recovery_attempt(
-                            session_id=session_id,
-                            api_key_id=api_key_id,
-                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                            owner_epoch=owner_epoch,
-                            request_fingerprint=request_fingerprint,
-                        )
-                    )
+                    rollback_task = asyncio.create_task(rollback_checkpoint())
                     rolled_back, rollback_cancellation = await _await_task_deferring_cancellation(rollback_task)
                     return bool(rolled_back), rollback_cancellation
                 except asyncio.CancelledError as cancellation:
@@ -3922,17 +3934,24 @@ class _HTTPBridgeStreamingMixin:
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
             ):
-                try:
-                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
-                        session_id=session.durable_session_id,
-                        api_key_id=bridge_session_key.api_key_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=session.durable_owner_epoch,
-                        request_fingerprint=durable_recovery_attempt_fingerprint,
-                    )
-                except Exception:
-                    marked = False
-                    logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
+
+                async def claim_ambiguous_recovery() -> bool:
+                    try:
+                        return bool(
+                            await self._durable_bridge.mark_recovery_attempt_replayed(
+                                session_id=session.durable_session_id,
+                                api_key_id=bridge_session_key.api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                                request_fingerprint=durable_recovery_attempt_fingerprint,
+                            )
+                        )
+                    except Exception:
+                        logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
+                        return False
+
+                claim_task = asyncio.create_task(claim_ambiguous_recovery())
+                marked, claim_cancellation = await _await_task_deferring_cancellation(claim_task)
                 if marked:
                     durable_recovery_retry_armed = True
                     recovery_origin_session_id = (
@@ -3968,6 +3987,8 @@ class _HTTPBridgeStreamingMixin:
                         owner_check_applied=True,
                     )
                     try:
+                        if claim_cancellation is not None:
+                            raise claim_cancellation
                         await self._reset_http_bridge_session_after_local_terminal_error(
                             session,
                             error_code="stream_incomplete",
@@ -4006,6 +4027,8 @@ class _HTTPBridgeStreamingMixin:
                             raise rollback_cancellation
                         raise
                 else:
+                    if claim_cancellation is not None:
+                        raise claim_cancellation
                     durable_recovery_attempt_available = False
             is_context_overflow = _http_bridge_is_context_overflow_error(exc)
             should_rollover_after_context_overflow = _http_bridge_should_rollover_after_context_overflow(

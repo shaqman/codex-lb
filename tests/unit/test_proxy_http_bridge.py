@@ -37412,7 +37412,9 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancellation_stage", [None, "claim_and_rollback", "rollback_only"])
+@pytest.mark.parametrize(
+    "cancellation_stage", [None, "claim_and_rollback", "rollback_only", "rollback_failure", "ambiguous_claim"]
+)
 async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without_continuity_provenance(
     monkeypatch: pytest.MonkeyPatch,
     cancellation_stage: str | None,
@@ -37514,14 +37516,20 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
             }
         },
     )
+    if cancellation_stage == "ambiguous_claim":
+        stale_rejection = ProxyResponseError(
+            502, {"error": {"code": "stream_incomplete", "message": "upstream disconnected"}}
+        )
     stream_attempts: list[tuple[str | None, str | None, str]] = []
     prepared_states: list[proxy_service._WebSocketRequestState] = []
     claim_started = asyncio.Event()
     release_claim = asyncio.Event()
     rollback_started = asyncio.Event()
     release_rollback = asyncio.Event()
+    claim_arguments: list[dict[str, object]] = []
 
     async def delayed_claim(**_kwargs: object) -> bool:
+        claim_arguments.append(_kwargs)
         claim_started.set()
         await release_claim.wait()
         return True
@@ -37529,6 +37537,8 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
     async def delayed_rollback(**_kwargs: object) -> bool:
         rollback_started.set()
         await release_rollback.wait()
+        if cancellation_stage == "rollback_failure":
+            raise RuntimeError("rollback failed")
         return True
 
     rollback_claim = AsyncMock(side_effect=delayed_rollback)
@@ -37610,7 +37620,7 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         )
         monkeypatch.setattr(service._durable_bridge, "mark_recovery_attempt_replayed", delayed_claim)
         monkeypatch.setattr(service._durable_bridge, "rollback_recovery_attempt_replayed", rollback_claim)
-        if cancellation_stage == "rollback_only":
+        if cancellation_stage in {"rollback_only", "rollback_failure"}:
             monkeypatch.setattr(
                 service._durable_bridge,
                 "reset_operation_event_spool",
@@ -37652,7 +37662,7 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
     if cancel_during_journal_claim:
         task = asyncio.create_task(collect())
         await asyncio.wait_for(claim_started.wait(), timeout=5)
-        if cancellation_stage == "claim_and_rollback":
+        if cancellation_stage in {"claim_and_rollback", "ambiguous_claim"}:
             task.cancel()
         release_claim.set()
         await asyncio.wait_for(rollback_started.wait(), timeout=5)
@@ -37662,8 +37672,8 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
             await task
         rollback_claim.assert_awaited_once()
         assert rollback_claim.await_args is not None
-        assert rollback_claim.await_args.kwargs["request_fingerprint"] == "journal-soft-owner-replay"
-        assert not prepared_states[0].recovery_attempt_claimed
+        assert rollback_claim.await_args.kwargs["request_fingerprint"] == claim_arguments[0]["request_fingerprint"]
+        assert prepared_states[-1].recovery_attempt_claimed is (cancellation_stage == "rollback_failure")
         assert len(stream_attempts) == 1
         assert get_or_create.await_count == 1
         return
