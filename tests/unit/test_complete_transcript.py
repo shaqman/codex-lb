@@ -1363,11 +1363,20 @@ def test_materialize_output_items_rejects_conflicting_terminal_output() -> None:
     assert materialize_output_items_from_events(events) is None
 
 
-@pytest.mark.parametrize("other_terminal", ["response.incomplete", "response.failed", "error", "response.cancelled"])
+@pytest.mark.parametrize(
+    "other_terminal", ["response.incomplete", "response.failed", "error", "response.cancelled", None]
+)
 @pytest.mark.parametrize("conflict_first", [False, True])
-def test_materialize_output_items_rejects_conflicting_terminal_types(other_terminal: str, conflict_first: bool) -> None:
+def test_materialize_output_items_rejects_conflicting_terminal_types(
+    other_terminal: str | None, conflict_first: bool
+) -> None:
     completed = 'data: {"type":"response.completed","response":{"output":[{"type":"message"}]}}\n\n'
-    conflict = "data: " + json.dumps({"type": other_terminal, "response": {"output": []}}) + "\n\n"
+    conflict_payload = (
+        {"error": {"code": "upstream_error", "message": "broken stream"}}
+        if other_terminal is None
+        else {"type": other_terminal, "response": {"output": []}}
+    )
+    conflict = "data: " + json.dumps(conflict_payload) + "\n\n"
     events = [conflict, completed] if conflict_first else [completed, conflict]
     assert materialize_output_items_from_events(events) is None
 

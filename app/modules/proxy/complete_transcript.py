@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import cast
 
+from app.core.openai.parsing import classify_event_type
 from app.core.types import JsonValue
 from app.core.utils.sse import extract_sse_data, parse_sse_data_json
 from app.modules.proxy.durable_bridge_repository import DurableBridgeTranscriptTurn
@@ -61,7 +62,7 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
         payload = parse_sse_data_json(event_text)
         if not isinstance(payload, dict):
             return None
-        event_type = payload.get("type")
+        event_type = classify_event_type(payload)
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             if saw_completed:
                 # Output lifecycle frames after the terminal response belong

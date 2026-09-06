@@ -724,11 +724,16 @@ async def test_public_responses_rejects_terminal_output_type_mismatch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("second_type", ["response.completed", "response.incomplete", "response.failed"])
-async def test_public_responses_rejects_duplicate_terminal_events(second_type: str) -> None:
+@pytest.mark.parametrize("second_type", ["response.completed", "response.incomplete", "response.failed", "error", None])
+async def test_public_responses_rejects_duplicate_terminal_events(second_type: str | None) -> None:
+    second_payload = (
+        {"error": {"code": "upstream_error", "message": "broken stream"}}
+        if second_type is None
+        else {"type": second_type, "response": {"id": "resp_1", "output": []}}
+    )
     wire = [
         'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}\n\n',
-        "data: " + json.dumps({"type": second_type, "response": {"id": "resp_1", "output": []}}) + "\n\n",
+        "data: " + json.dumps(second_payload) + "\n\n",
     ]
     result = await proxy_api_module._collect_responses_payload(_iter_blocks(*wire))
     assert result.model_dump(mode="json", exclude_none=True)["error"]["code"] == "invalid_output_item"

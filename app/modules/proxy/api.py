@@ -9069,7 +9069,7 @@ async def _normalize_public_responses_stream(
                     openai_error("stream_incomplete", "Native upstream transport ended before a terminal event"),
                     failure_phase="upstream",
                 )
-        raw_event_type = payload.get("type")
+        raw_event_type = classify_event_type(payload)
         if (
             enforce_openai_sdk_contract
             and terminal_seen

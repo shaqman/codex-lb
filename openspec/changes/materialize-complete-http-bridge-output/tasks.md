@@ -19,6 +19,9 @@
 
 ## 2. Verification
 
+- [x] 2.7 Recognize typeless error envelopes as terminal conflicts in public
+  streaming and durable transcript materialization, with regression coverage.
+
 - [x] 2.6 Reset per-attempt tool manifests before security-work replay and protect
   ambiguous-rebind compensation through repeated native cancellation, including
   durable rollback and event-fence restoration for both recovery paths.
