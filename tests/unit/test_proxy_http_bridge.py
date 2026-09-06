@@ -9924,7 +9924,10 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     assert persist_task.done() is False
     release_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
-    assert append_kwargs["response_id"] == replay_response_id
+    # Durable transcript identity remains the upstream response id; the
+    # replay-visible id is carried separately for client delivery/fallback
+    # settlement.
+    assert append_kwargs["response_id"] == expected_response_id
     assert append_kwargs["expected_recovery_dispatch_count"] == 2
     assert settlement_kwargs["expected_response_id"] == expected_response_id
     assert settlement_kwargs["expected_recovery_dispatch_count"] == 2
@@ -32039,7 +32042,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.response_event_count == (1 if leading_telemetry else 0)
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, allow_complete_transcript_recovery=True)
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()

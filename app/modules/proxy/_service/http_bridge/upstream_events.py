@@ -159,6 +159,7 @@ from app.modules.proxy._service.support import (
     _PENDING_TOOL_CALL_ITEM_TYPES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _call_with_supported_optional_kwargs,
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
@@ -885,7 +886,7 @@ async def _persist_http_bridge_operation_event(
                             expected_response_id=expected_response_id,
                             expected_recovery_dispatch_count=effective_operation_attempt_generation,
                             alternate_expected_response_id=alternate_expected_response_id,
-                            response_id=operation_response_id,
+                            response_id=downstream_response_id,
                         )
                     else:
                         await _update_http_bridge_operation_state(
@@ -3842,10 +3843,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     event_operation_attempt_generations = receive_operation_attempt_generations
                     receive_operation_attempt_generations = None
-                    await self._process_http_bridge_upstream_text(
+                    await _call_with_supported_optional_kwargs(
+                        self._process_http_bridge_upstream_text,
                         session,
                         message.text,
-                        operation_attempt_generations=event_operation_attempt_generations,
+                        optional_kwargs={
+                            "operation_attempt_generations": event_operation_attempt_generations,
+                        }
+                        if event_operation_attempt_generations
+                        else {},
                     )
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break
