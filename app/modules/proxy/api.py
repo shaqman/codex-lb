@@ -8742,6 +8742,8 @@ async def _collect_responses_payload(
             contract_violation_kind = contract_violation_kind or "invalid_output_item"
             output_lifecycle_invalid = True
         if terminal_result is not None:
+            if event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                contract_violation_kind = contract_violation_kind or "invalid_output_item"
             continue
         if event_type == "error":
             terminal_result = _parse_event_error_envelope(payload)
@@ -9067,6 +9069,19 @@ async def _normalize_public_responses_stream(
                     failure_phase="upstream",
                 )
         raw_event_type = payload.get("type")
+        if (
+            enforce_openai_sdk_contract
+            and terminal_seen
+            and isinstance(raw_event_type, str)
+            and raw_event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
+        ):
+            # The first terminal may already be on the wire. Abort rather
+            # than emitting a second, contradictory terminal outcome.
+            raise ProxyResponseError(
+                502,
+                openai_error("invalid_output_item", "Responses stream produced multiple terminal events"),
+                failure_phase="upstream",
+            )
         if terminal_seen and raw_event_type in {"response.output_item.added", "response.output_item.done"}:
             # A terminal response closes the output lifecycle. Do not let a
             # late frame mutate the collected replay or leak to the client.
