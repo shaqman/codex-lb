@@ -2037,6 +2037,7 @@ async def _try_unsafe_partial_transcript_recovery(
     The interrupted response is discarded; the durable parent transcript and
     the original request input are sent as one new account-neutral response.
     """
+    rebind_claim_id = str(uuid4())
     settings = _service_get_settings()
     # Capture the compare-and-set generation before any transcript lookup
     # await. A concurrent recovery may advance the shared state while this
@@ -2224,6 +2225,7 @@ async def _try_unsafe_partial_transcript_recovery(
                     rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
                     rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
                     expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                    rebind_claim_id=rebind_claim_id,
                 )
             )
             if rolled_back and callable(rollback_fence_operation):
@@ -2282,6 +2284,15 @@ async def _try_unsafe_partial_transcript_recovery(
             and getattr(current_operation, "state", None) in {"submitted", "acknowledged"}
         )
 
+    original_operation = None
+    get_original_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+    if callable(get_original_operation):
+        try:
+            original_operation = await get_original_operation(operation_id=operation_id)
+        except Exception:
+            logger.warning("Failed to read pre-rebind unsafe HTTP bridge operation", exc_info=True)
+            return False
+
     rebind_task = asyncio.create_task(
         rebind_operation(
             operation_id=operation_id,
@@ -2293,6 +2304,7 @@ async def _try_unsafe_partial_transcript_recovery(
             request_text=replay_text,
             allow_acknowledged=True,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+            rebind_claim_id=rebind_claim_id,
         )
     )
     try:
@@ -2316,8 +2328,20 @@ async def _try_unsafe_partial_transcript_recovery(
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
             return True
-        with anyio.CancelScope(shield=True):
-            await rollback_rebound_operation(None)
+        if (
+            original_operation is not None
+            and original_operation.recovery_dispatch_count == expected_recovery_dispatch_count
+            and original_operation.session_id == session.durable_session_id
+        ):
+            rollback_snapshot = replace(
+                original_operation,
+                rebound_from_session_id=original_operation.session_id,
+                rebound_from_account_id=original_operation.account_id,
+                rebound_from_model=original_operation.model,
+                rebound_from_parent_response_id=original_operation.parent_response_id,
+            )
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rollback_snapshot)
         logger.warning(
             "Unsafe HTTP bridge partial transcript recovery operation rebind failed request_id=%s",
             getattr(request_state, "request_id", None),
@@ -2439,6 +2463,7 @@ async def _try_unsafe_partial_transcript_recovery(
     )
     request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
     request_state.unsafe_partial_replay_count = getattr(request_state, "unsafe_partial_replay_count", 0) + 1
+    request_state.operation_rebind_claim_id = rebind_claim_id
     request_state.unsafe_partial_replay_retry_authorized = True
     request_enqueued = False
     request_counted_in_queue = False

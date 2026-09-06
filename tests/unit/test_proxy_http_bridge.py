@@ -9341,8 +9341,10 @@ async def test_unsafe_partial_transcript_recovery_fails_closed_without_parent_tr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous_exception", [False, True])
 async def test_unsafe_partial_transcript_recovery_preserves_fence_when_rebind_fails(
     monkeypatch: pytest.MonkeyPatch,
+    ambiguous_exception: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="unsafe-partial-rebind-fails")
@@ -9365,12 +9367,30 @@ async def test_unsafe_partial_transcript_recovery_preserves_fence_when_rebind_fa
         operation_dispatched=True,
         response_event_count=1,
     )
-    rebind_operation = AsyncMock(return_value=None)
+    rebind_operation = AsyncMock(
+        return_value=None,
+        side_effect=RuntimeError("ambiguous commit") if ambiguous_exception else None,
+    )
+    from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot
+
+    original_operation = DurableBridgeOperationSnapshot(
+        operation_id="op-rebind-fails",
+        session_id=session.durable_session_id,
+        request_fingerprint="fingerprint-rebind-fails",
+        account_id="original-account",
+        model="original-model",
+        parent_response_id="resp-original",
+        state="acknowledged",
+        response_id="resp-progress",
+    )
+    rollback_operation = AsyncMock(return_value=False)
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
             get_complete_transcript=AsyncMock(return_value=[object()]),
             rebind_operation_for_complete_transcript=rebind_operation,
+            get_operation=AsyncMock(return_value=original_operation),
+            rollback_operation_before_dispatch=rollback_operation,
         ),
     )
     monkeypatch.setattr(
@@ -9403,6 +9423,17 @@ async def test_unsafe_partial_transcript_recovery_preserves_fence_when_rebind_fa
     rebind_operation.assert_awaited_once()
     assert rebind_operation.await_args is not None
     assert rebind_operation.await_args.kwargs["allow_acknowledged"] is True
+    if ambiguous_exception:
+        rollback_operation.assert_awaited_once()
+        assert rollback_operation.await_args is not None
+        assert (
+            rollback_operation.await_args.kwargs["rebind_claim_id"]
+            == rebind_operation.await_args.kwargs["rebind_claim_id"]
+        )
+        assert rollback_operation.await_args.kwargs["rebind_claim_id"]
+        assert rollback_operation.await_args.kwargs["rebound_from_parent_response_id"] == "resp-original"
+    else:
+        rollback_operation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
