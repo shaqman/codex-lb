@@ -5541,6 +5541,11 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.upstream_model_output_seen = False
         request_state.deferred_reasoning_downstream_texts = []
         request_state.awaiting_response_created = True
+        request_state.pending_function_call_ids = []
+        request_state.pending_tool_call_types = {}
+        request_state.added_tool_call_types = {}
+        request_state.added_tool_call_item_ids = set()
+        request_state.tool_call_manifest_invalid = False
         if retry_text != request_state.request_text:
             _bind_http_bridge_proxy_injected_anchor(
                 self,

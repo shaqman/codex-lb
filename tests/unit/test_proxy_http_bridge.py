@@ -8699,8 +8699,12 @@ async def test_complete_transcript_recovery_preserves_state_when_rebind_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_partial", [False, True])
+@pytest.mark.parametrize("cancel_stage", [None, "rollback", "fence"])
 async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exception(
     monkeypatch: pytest.MonkeyPatch,
+    unsafe_partial: bool,
+    cancel_stage: str | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="recovery-ambiguous-rebind")
@@ -8741,6 +8745,23 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     )
     rebind_operation = AsyncMock(side_effect=RuntimeError("connection lost after commit"))
     rollback_operation = AsyncMock(return_value=True)
+    rollback_fence = AsyncMock()
+    cancellation_started = asyncio.Event()
+    release_compensation = asyncio.Event()
+
+    async def blocked_compensation(**_kwargs: Any) -> bool:
+        cancellation_started.set()
+        await release_compensation.wait()
+        return True
+
+    if cancel_stage == "rollback":
+        rollback_operation.side_effect = blocked_compensation
+    elif cancel_stage == "fence":
+        rollback_fence.side_effect = blocked_compensation
+    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(rollback_fence_operation=rollback_fence))
+    if unsafe_partial:
+        request_state.operation_dispatched = True
+        request_state.response_event_count = 1
     from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot
 
     original_operation = DurableBridgeOperationSnapshot(
@@ -8772,6 +8793,7 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
         "_service_get_settings",
         lambda: SimpleNamespace(
             http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
             http_responses_session_bridge_complete_transcript_max_turns=128,
             http_responses_session_bridge_complete_transcript_max_bytes=1024,
             http_responses_session_bridge_complete_transcript_max_input_items=32,
@@ -8780,13 +8802,33 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     )
     monkeypatch.setattr(service, "_http_bridge_retry_circuit_generation", AsyncMock(return_value=(True, None)))
 
-    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
-        service,
-        session,
-        request_state,
+    recover = (
+        http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery
+        if unsafe_partial
+        else http_bridge_upstream_events_module._try_complete_transcript_recovery
     )
-
-    assert recovered is False
+    if cancel_stage is None:
+        assert await recover(service, session, request_state) is False
+        assert request_state.operation_registered is False
+        assert request_state.operation_rebind_required is True
+    else:
+        recovery_task = asyncio.create_task(recover(service, session, request_state))
+        try:
+            await asyncio.wait_for(cancellation_started.wait(), timeout=2)
+            recovery_task.cancel()
+            await asyncio.sleep(0)
+            recovery_task.cancel()
+            await asyncio.sleep(0)
+            assert not recovery_task.done()
+            release_compensation.set()
+            with pytest.raises(asyncio.CancelledError):
+                await recovery_task
+        finally:
+            release_compensation.set()
+            if not recovery_task.done():
+                recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+    rollback_fence.assert_awaited_once_with(operation_id="op-ambiguous-rebind", recovery_dispatch_count=0)
     rollback_operation.assert_awaited_once()
     assert rollback_operation.await_args is not None
     assert rollback_operation.await_args.kwargs["restore_rebound"] is True
@@ -8799,8 +8841,6 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
         rollback_operation.await_args.kwargs["rebind_claim_id"] == rebind_operation.await_args.kwargs["rebind_claim_id"]
     )
     assert rollback_operation.await_args.kwargs["rebind_claim_id"]
-    assert request_state.operation_registered is False
-    assert request_state.operation_rebind_required is True
 
 
 @pytest.mark.asyncio

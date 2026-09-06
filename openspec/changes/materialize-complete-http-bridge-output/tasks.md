@@ -19,6 +19,10 @@
 
 ## 2. Verification
 
+- [x] 2.6 Reset per-attempt tool manifests before security-work replay and protect
+  ambiguous-rebind compensation through repeated native cancellation, including
+  durable rollback and event-fence restoration for both recovery paths.
+
 - [x] 2.5 Align live terminal validation with durable materialization for malformed
   output and duplicate completions, and verify recovery rejects both.
 

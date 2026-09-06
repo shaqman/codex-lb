@@ -1675,6 +1675,13 @@ async def _try_complete_transcript_recovery(
             return False
 
     async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        rollback_task = asyncio.create_task(rollback_rebound_operation_impl(rebound_operation))
+        rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if cancellation is not None:
+            raise cancellation
+        return rolled_back
+
+    async def rollback_rebound_operation_impl(rebound_operation: Any) -> bool:
         """Undo a durable rebind when event fencing blocks dispatch."""
         rollback_operation = getattr(
             getattr(service, "_durable_bridge", None),
@@ -2200,6 +2207,13 @@ async def _try_unsafe_partial_transcript_recovery(
             return False
 
     async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        rollback_task = asyncio.create_task(rollback_rebound_operation_impl(rebound_operation))
+        rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if cancellation is not None:
+            raise cancellation
+        return rolled_back
+
+    async def rollback_rebound_operation_impl(rebound_operation: Any) -> bool:
         """Undo a durable rebind when event fencing blocks dispatch."""
         rollback_operation = getattr(
             getattr(service, "_durable_bridge", None),

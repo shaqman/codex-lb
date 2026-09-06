@@ -22371,6 +22371,11 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
             codex_session_source=cast(Any, sticky_source),
         ),
     )
+    request_state.pending_function_call_ids = ["call-interrupted"]
+    request_state.pending_tool_call_types = {"call-interrupted": "function_call"}
+    request_state.added_tool_call_types = {"call-interrupted": "function_call"}
+    request_state.added_tool_call_item_ids = {"item-interrupted"}
+    request_state.tool_call_manifest_invalid = True
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-rejected", None)
     session = proxy_service._HTTPBridgeSession(
         key=key,
@@ -22430,6 +22435,11 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
         assert target_session is session
         assert request_state.excluded_account_ids == {rejected_account.id}
         assert request_state.affinity_policy.key is None
+        assert request_state.pending_function_call_ids == []
+        assert request_state.pending_tool_call_types == {}
+        assert request_state.added_tool_call_types == {}
+        assert request_state.added_tool_call_item_ids == set()
+        assert request_state.tool_call_manifest_invalid is False
         # The raw legacy conflict check and durable replacement claim happen
         # before any live session continuity field is swapped.
         assert target_session.affinity == original_affinity

@@ -31,6 +31,12 @@ cannot be built.
 Pre-dispatch recovery checkpoint rollback MUST finish before native task
 cancellation propagates, and successful rollback MUST clear its in-memory
 claim before the remaining submit cleanup completes.
+Ambiguous-rebind compensation for complete and unsafe-partial recovery MUST
+finish both durable rollback and event-fence restoration before propagating
+native cancellation, including repeated cancellation.
+
+Security-work replay MUST clear the interrupted attempt's pending and added
+tool-call manifest entries and invalid-manifest marker before reconnecting.
 
 The retry caller MUST install its refund guard before awaiting a durable
 UNKNOWN-operation claim. If cancellation arrives during a successful claim,
