@@ -866,6 +866,69 @@ async def test_terminal_append_rejects_stale_owner_for_same_generation() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spool_format", ["rows_v1", "chunks_v2"])
+async def test_terminal_drain_rejects_same_generation_owner_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    spool_format: str,
+) -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60,
+        spool_format=spool_format,
+    )
+    drain_finished = asyncio.Event()
+    handoff_finished = asyncio.Event()
+    original_flush = batcher.flush_pending_operation
+
+    async def paused_flush(*, operation_id: str) -> bool:
+        result = await original_flush(operation_id=operation_id)
+        drain_finished.set()
+        await handoff_finished.wait()
+        return result
+
+    monkeypatch.setattr(batcher, "flush_pending_operation", paused_flush)
+    await _enqueue(batcher, "old-output")
+    task = asyncio.create_task(
+        batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="session-1",
+            instance_id="instance-1",
+            owner_epoch=1,
+            event_text="stale-terminal",
+            max_bytes=1024,
+            state="completed",
+        )
+    )
+    try:
+        await asyncio.wait_for(drain_finished.wait(), timeout=2)
+        await batcher.enqueue(
+            operation_id="op-1",
+            session_id="session-2",
+            instance_id="instance-2",
+            owner_epoch=2,
+            event_text="successor-output",
+        )
+        handoff_finished.set()
+        result = await asyncio.wait_for(task, timeout=2)
+        assert result.persisted is False
+        assert result.settlement_required is False
+        assert durable.terminal_rows == []
+        assert durable.terminal_chunks == []
+        context = batcher._contexts["op-1"]
+        assert (context.session_id, context.instance_id, context.owner_epoch) == ("session-2", "instance-2", 2)
+        assert await original_flush(operation_id="op-1") is True
+        batches = durable.batches if spool_format == "rows_v1" else durable.chunk_batches
+        assert batches == [["old-output"], ["successor-output"]]
+    finally:
+        handoff_finished.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_cleanup_preserves_newer_recovery_fence() -> None:
     durable = _BlockingTerminalAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

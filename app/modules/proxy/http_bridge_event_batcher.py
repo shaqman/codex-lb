@@ -585,22 +585,32 @@ class HttpBridgeOperationEventBatcher:
         if context is None:
             await self._cleanup_operation_state(operation_id)
             return TerminalOperationEventAppendResult(persisted=False)
+        if (context.session_id, context.instance_id, context.owner_epoch) != (session_id, instance_id, owner_epoch):
+            # A successor can enqueue while the terminal drain is suspended.
+            # Never borrow its ownership fence for this predecessor's terminal.
+            await self._cleanup_operation_state(operation_id)
+            return TerminalOperationEventAppendResult(persisted=False)
         if dropped:
             async with self._lock:
-                if self._operation_generations.get(operation_id, 0) == expected_recovery_dispatch_count:
-                    self._closing_operations.discard(operation_id)
-                    self._contexts.pop(operation_id, None)
-                    self._operation_generations.pop(operation_id, None)
-                    self._dropped_operations.discard(operation_id)
+                if (
+                    self._operation_generations.get(operation_id, 0) != expected_recovery_dispatch_count
+                    or self._contexts.get(operation_id) is not context
+                ):
+                    self._cleanup_operation_state_locked(operation_id)
+                    return TerminalOperationEventAppendResult(persisted=False)
+                self._closing_operations.discard(operation_id)
+                self._contexts.pop(operation_id, None)
+                self._operation_generations.pop(operation_id, None)
+                self._dropped_operations.discard(operation_id)
                 self._cleanup_operation_state_locked(operation_id)
             return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
         try:
             if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
                 persisted = await self._durable_bridge.append_terminal_operation_chunk(
                     operation_id=operation_id,
-                    session_id=context.session_id,
-                    instance_id=context.instance_id,
-                    owner_epoch=context.owner_epoch,
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,
@@ -610,9 +620,9 @@ class HttpBridgeOperationEventBatcher:
             else:
                 persisted = await self._durable_bridge.append_terminal_operation_event(
                     operation_id=operation_id,
-                    session_id=context.session_id,
-                    instance_id=context.instance_id,
-                    owner_epoch=context.owner_epoch,
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,

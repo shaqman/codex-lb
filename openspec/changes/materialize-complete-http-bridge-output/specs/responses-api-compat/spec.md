@@ -32,6 +32,11 @@ Pre-dispatch recovery checkpoint rollback MUST finish before native task
 cancellation propagates, and successful rollback MUST clear its in-memory
 claim before the remaining submit cleanup completes.
 
+A terminal event MUST remain bound to its original session, instance, and
+owner epoch while pending events drain. A same-generation ownership handoff
+MUST NOT let the predecessor append its terminal event with successor credentials
+or clear the successor's pending state.
+
 When a complete replay-input snapshot is available, recovery MUST use it as
 the fresh request input even if an upstream parent response is no longer
 available.
