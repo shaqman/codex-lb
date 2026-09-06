@@ -1761,6 +1761,17 @@ async def _try_complete_transcript_recovery(
             and getattr(current_operation, "recovery_dispatch_count", 0) > expected_recovery_dispatch_count
         )
 
+    # Retain the pre-transaction metadata independently of the rebind result:
+    # a commit can succeed even when its result never reaches this caller.
+    original_operation = None
+    get_original_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+    if callable(get_original_operation):
+        try:
+            original_operation = await get_original_operation(operation_id=operation_id)
+        except Exception:
+            logger.warning("Failed to read pre-rebind HTTP bridge operation", exc_info=True)
+            return False
+
     rebind_task = asyncio.create_task(
         rebind_operation(
             operation_id=operation_id,
@@ -1797,8 +1808,20 @@ async def _try_complete_transcript_recovery(
         # The rebind may have committed before its response was lost. Roll it
         # back under the owner fence instead of mistaking our own generation
         # advance for a competing recovery and suppressing the retry.
-        with anyio.CancelScope(shield=True):
-            await rollback_rebound_operation(None)
+        if (
+            original_operation is not None
+            and original_operation.recovery_dispatch_count == expected_recovery_dispatch_count
+            and original_operation.session_id == session.durable_session_id
+        ):
+            rollback_snapshot = replace(
+                original_operation,
+                rebound_from_session_id=original_operation.session_id,
+                rebound_from_account_id=original_operation.account_id,
+                rebound_from_model=original_operation.model,
+                rebound_from_parent_response_id=original_operation.parent_response_id,
+            )
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rollback_snapshot)
         logger.warning(
             "Complete HTTP bridge transcript recovery operation rebind failed request_id=%s",
             request_state.request_id,

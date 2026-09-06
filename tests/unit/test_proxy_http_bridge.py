@@ -8741,12 +8741,25 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     )
     rebind_operation = AsyncMock(side_effect=RuntimeError("connection lost after commit"))
     rollback_operation = AsyncMock(return_value=True)
+    from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot
+
+    original_operation = DurableBridgeOperationSnapshot(
+        operation_id="op-ambiguous-rebind",
+        session_id=session.durable_session_id,
+        request_fingerprint="fingerprint-ambiguous-rebind",
+        account_id="original-account",
+        model="original-model",
+        parent_response_id="resp-original-parent",
+        state="unknown",
+        response_id=None,
+    )
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
             get_complete_transcript=AsyncMock(return_value=[object()]),
             rebind_operation_for_complete_transcript=rebind_operation,
             rollback_operation_before_dispatch=rollback_operation,
+            get_operation=AsyncMock(return_value=original_operation),
         ),
     )
     monkeypatch.setattr(
@@ -8777,6 +8790,10 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     rollback_operation.assert_awaited_once()
     assert rollback_operation.await_args is not None
     assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == original_operation.session_id
+    assert rollback_operation.await_args.kwargs["rebound_from_account_id"] == "original-account"
+    assert rollback_operation.await_args.kwargs["rebound_from_model"] == "original-model"
+    assert rollback_operation.await_args.kwargs["rebound_from_parent_response_id"] == "resp-original-parent"
     assert request_state.operation_registered is False
     assert request_state.operation_rebind_required is True
 

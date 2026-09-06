@@ -1214,6 +1214,41 @@ async def test_complete_transcript_bounds_unsnapshotted_root_by_persisted_depth(
         assert turns[0].represented_turn_count == expected_turn_count
 
 
+@pytest.mark.parametrize("max_turns", [1, 2, 3])
+@pytest.mark.asyncio
+async def test_complete_transcript_accumulates_unsnapshotted_chain_depth(max_turns: int) -> None:
+    rows = [
+        replace(
+            _turn(
+                number,
+                parent_response_id=f"resp_{number - 1}" if number > 1 else None,
+                response_id=f"resp_{number}",
+                request_input=[],
+                output=[],
+            ).operation,
+            response_output_items_complete=True,
+            response_output_items_json="[]",
+            response_replay_input_turn_count=1,
+        )
+        for number in (3, 2, 1)
+    ]
+
+    class Session:
+        async def scalar(self, _statement: object) -> object:
+            return rows.pop(0)
+
+    turns = await DurableBridgeRepository(cast(AsyncSession, Session())).get_complete_transcript(
+        response_id="resp_3",
+        max_turns=max_turns,
+    )
+    if max_turns < 3:
+        assert turns is None
+    else:
+        assert turns is not None
+        assert [turn.operation.response_id for turn in turns] == ["resp_1", "resp_2", "resp_3"]
+        assert sum(turn.represented_turn_count for turn in turns) == 3
+
+
 @pytest.mark.parametrize(
     ("request_text", "expected_turn_count"),
     [
