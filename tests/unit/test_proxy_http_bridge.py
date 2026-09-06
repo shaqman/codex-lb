@@ -28372,10 +28372,26 @@ async def test_cleanup_http_bridge_submit_interruption_clears_restored_operation
 
 
 @pytest.mark.asyncio
-async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_fence() -> None:
+@pytest.mark.parametrize("cancel_during", [None, "operation", "fence"])
+async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_fence(cancel_during: str | None) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    rollback_operation = AsyncMock(return_value=True)
-    rollback_fence_operation = AsyncMock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def rollback(**_kwargs: Any) -> bool:
+        if cancel_during == "operation":
+            started.set()
+            await release.wait()
+        return True
+
+    async def rollback_fence(**_kwargs: Any) -> None:
+        if cancel_during == "fence":
+            started.set()
+            await release.wait()
+
+    rollback_operation = AsyncMock(side_effect=rollback)
+    rollback_fence_operation = AsyncMock(side_effect=rollback_fence)
+    service._maybe_release_idle_http_bridge_session_lease = AsyncMock()
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(rollback_operation_before_dispatch=rollback_operation),
@@ -28401,19 +28417,35 @@ async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_f
         operation_recovery_expected_generation=2,
     )
 
-    await service._cleanup_http_bridge_submit_interruption(
-        session,
-        request_state=request_state,
-        gate_acquired=False,
-        request_enqueued=False,
-        counted_in_queue=False,
+    cleanup_task = asyncio.create_task(
+        service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=False,
+            counted_in_queue=False,
+        )
     )
+    if cancel_during is not None:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        cleanup_task.cancel()
+        await asyncio.sleep(0)
+        cleanup_task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup_task, timeout=2)
+    else:
+        await cleanup_task
 
     rollback_operation.assert_awaited_once()
     rollback_fence_operation.assert_awaited_once_with(
         operation_id="operation-rebound-fence",
         recovery_dispatch_count=2,
     )
+    assert not request_state.operation_registered
+    assert not request_state.operation_rebound
+    assert request_state.operation_rebind_required
+    service._maybe_release_idle_http_bridge_session_lease.assert_awaited_once_with(session)
 
 
 @pytest.mark.asyncio

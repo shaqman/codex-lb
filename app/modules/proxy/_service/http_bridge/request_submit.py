@@ -3484,6 +3484,39 @@ class _HTTPBridgeRequestSubmitMixin:
         counted_in_queue: bool,
         admission_waiter_registered: bool = False,
     ) -> None:
+        """Finish operation, fence and admission cleanup before caller cancellation."""
+
+        async def cleanup() -> BaseException | None:
+            try:
+                await self._cleanup_http_bridge_submit_interruption_impl(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                    counted_in_queue=counted_in_queue,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+            except BaseException as exc:
+                return exc
+            return None
+
+        cleanup_task = asyncio.create_task(cleanup())
+        cleanup_error, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+        if cancellation is not None:
+            raise cancellation from cleanup_error
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    async def _cleanup_http_bridge_submit_interruption_impl(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        gate_acquired: bool,
+        request_enqueued: bool,
+        counted_in_queue: bool,
+        admission_waiter_registered: bool = False,
+    ) -> None:
         retire_closed_session = False
         rollback_cancellation: asyncio.CancelledError | None = None
         async with session.pending_lock:
