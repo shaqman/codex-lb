@@ -22,7 +22,9 @@ _LEGACY_INTERNAL_METADATA_FIELDS = frozenset({"create_time", "turn_id"})
 
 
 def _terminal_output_is_valid(response: JsonValue) -> bool:
-    if not isinstance(response, dict) or "output" not in response:
+    if not isinstance(response, dict):
+        return False
+    if "output" not in response:
         return True
     output = response["output"]
     return isinstance(output, list) and all(isinstance(item, dict) for item in output)

@@ -9575,10 +9575,41 @@ def test_unsafe_partial_replay_keeps_sequence_numbers_monotonic() -> None:
     assert request_state.last_downstream_sequence_number == 7
 
 
-@pytest.mark.parametrize("bad_output", [None, "malformed", {}, ["malformed"]])
+def test_response_output_capture_accepts_object_terminal_with_omitted_output() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="omitted-output",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    item = {"type": "message", "id": "msg_1"}
+    events: list[dict[str, Any]] = [
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+        {"type": "response.completed", "response": {}},
+    ]
+    for event in events:
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            state,
+            event_type=event["type"],
+            payload=event,
+        )
+    assert state.response_output_items_complete is True
+    assert state.response_output_items == [item]
+    assert http_bridge_upstream_events_module.materialize_output_items_from_events(
+        ["data: " + json.dumps(event) + "\n\n" for event in events]
+    ) == [item]
+
+
+@pytest.mark.parametrize(
+    "terminal_fields",
+    [{"response": {"output": value}} for value in (None, "malformed", {}, ["malformed"])]
+    + [{}, *({"response": value} for value in (None, "malformed", [], 0, False))],
+)
 @pytest.mark.asyncio
 async def test_response_output_capture_rejects_malformed_terminal_output(
-    bad_output: Any,
+    terminal_fields: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = proxy_service._WebSocketRequestState(
@@ -9591,7 +9622,7 @@ async def test_response_output_capture_rejects_malformed_terminal_output(
     )
     events: list[dict[str, Any]] = [
         {"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "id": "msg_1"}},
-        {"type": "response.completed", "response": {"output": bad_output}},
+        {"type": "response.completed", **terminal_fields},
     ]
     for event in events:
         http_bridge_upstream_events_module._record_http_bridge_response_output(
