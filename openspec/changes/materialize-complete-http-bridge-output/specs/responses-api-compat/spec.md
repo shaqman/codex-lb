@@ -32,6 +32,11 @@ Pre-dispatch recovery checkpoint rollback MUST finish before native task
 cancellation propagates, and successful rollback MUST clear its in-memory
 claim before the remaining submit cleanup completes.
 
+The retry caller MUST install its refund guard before awaiting a durable
+UNKNOWN-operation claim. If cancellation arrives during a successful claim,
+the caller MUST restore UNKNOWN and refund its recovery generation before
+propagating cancellation without dispatching a replacement request.
+
 A terminal event MUST remain bound to its original session, instance, and
 owner epoch while pending events drain. A same-generation ownership handoff
 MUST NOT let the predecessor append its terminal event with successor credentials

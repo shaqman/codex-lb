@@ -5098,65 +5098,70 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.operation_recovery_claimed = False
                 request_state.operation_attempt_generation = operation_attempt_generation_before_claim
 
-        if allow_operation_fenced_continuity_replay:
-            # The durable claim performs database reads, spool deletion, and a
-            # commit. Keep it outside ``pending_lock`` so a slow store cannot
-            # block unrelated submits or detaches for this session.
-            claim_was_already_set = request_state.operation_recovery_claimed
-            operation_fenced_claimed = await self._claim_http_bridge_operation_fenced_continuity_replay(
-                session, request_state
-            )
-            operation_claim_acquired_here = operation_fenced_claimed and not claim_was_already_set
-            if not operation_fenced_claimed:
-                return False
-            # The request may detach or become non-retryable while the durable
-            # claim is in flight. Re-check ownership after the claim, then
-            # refund that exact claim before returning so the next request is
-            # not fenced out by a phantom submitted attempt.
-            async with session.pending_lock:
-                claim_retryable_requests = prioritize_precreated_retryable_requests(
-                    [
-                        pending_request
-                        for pending_request in session.pending_requests
-                        if not pending_request.draining_until_terminal
-                        and (
-                            (
-                                pending_request is request_state
-                                and request_state_was_retryable_before_prepare
-                                and retryability_baseline_is_unchanged()
-                            )
-                            or request_is_retryable(pending_request)
-                        )
-                    ]
-                )
-                claim_still_retryable = (
-                    len(claim_retryable_requests) == 1
-                    and any(candidate is request_state for candidate in claim_retryable_requests)
-                    and not request_state.draining_until_terminal
-                    and _http_bridge_request_counts_against_queue(request_state)
-                    and (
-                        (request_state_was_retryable_before_prepare and retryability_baseline_is_unchanged())
-                        or request_is_retryable(request_state)
-                    )
-                )
-            if not claim_still_retryable:
-                await rollback_operation_fenced_claim()
-                return False
-        retry_jitter_seconds = (
-            self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
-        )
-        retry_event = "retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated"
-        _log_http_bridge_event(
-            retry_event,
-            session.key,
-            account_id=session.account.id,
-            model=session.request_model,
-            pending_count=1,
-            cache_key_family=session.key.affinity_kind,
-            model_class=_extract_model_class(session.request_model) if session.request_model else None,
-        )
-        reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
         try:
+            if allow_operation_fenced_continuity_replay:
+                # The durable claim performs database reads, spool deletion, and a
+                # commit. Keep it outside ``pending_lock`` so a slow store cannot
+                # block unrelated submits or detaches for this session.
+                claim_was_already_set = request_state.operation_recovery_claimed
+                try:
+                    operation_fenced_claimed = await self._claim_http_bridge_operation_fenced_continuity_replay(
+                        session, request_state
+                    )
+                finally:
+                    # The callee records successful durable claims before raising
+                    # deferred cancellation. Own their refund even on that exit.
+                    operation_claim_acquired_here = (
+                        request_state.operation_recovery_claimed and not claim_was_already_set
+                    )
+                if not operation_fenced_claimed:
+                    return False
+                # The request may detach or become non-retryable while the durable
+                # claim is in flight. Re-check ownership after the claim, then
+                # refund that exact claim before returning so the next request is
+                # not fenced out by a phantom submitted attempt.
+                async with session.pending_lock:
+                    claim_retryable_requests = prioritize_precreated_retryable_requests(
+                        [
+                            pending_request
+                            for pending_request in session.pending_requests
+                            if not pending_request.draining_until_terminal
+                            and (
+                                (
+                                    pending_request is request_state
+                                    and request_state_was_retryable_before_prepare
+                                    and retryability_baseline_is_unchanged()
+                                )
+                                or request_is_retryable(pending_request)
+                            )
+                        ]
+                    )
+                    claim_still_retryable = (
+                        len(claim_retryable_requests) == 1
+                        and any(candidate is request_state for candidate in claim_retryable_requests)
+                        and not request_state.draining_until_terminal
+                        and _http_bridge_request_counts_against_queue(request_state)
+                        and (
+                            (request_state_was_retryable_before_prepare and retryability_baseline_is_unchanged())
+                            or request_is_retryable(request_state)
+                        )
+                    )
+                if not claim_still_retryable:
+                    return False
+            retry_jitter_seconds = (
+                self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
+            )
+            retry_event = "retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated"
+            _log_http_bridge_event(
+                retry_event,
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                pending_count=1,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
             if retry_jitter_seconds > 0:
                 logger.info(
                     "HTTP bridge clean-close retry jitter request_id=%s sleep_seconds=%.3f",
@@ -5305,12 +5310,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
             return False
         finally:
+            request_state.clean_close_retry_in_progress = False
             if operation_claim_acquired_here and not retry_send_started:
                 rollback_task = asyncio.create_task(rollback_operation_fenced_claim())
                 _, rollback_cancellation = await _await_task_deferring_cancellation(rollback_task)
                 if rollback_cancellation is not None:
                     raise rollback_cancellation
-            request_state.clean_close_retry_in_progress = False
 
     async def _retry_http_bridge_precreated_auth_request(
         self: Any,

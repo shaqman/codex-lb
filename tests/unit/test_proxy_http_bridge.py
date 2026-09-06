@@ -2534,8 +2534,10 @@ async def test_parked_recovery_claim_defers_cancellation_until_claim_state_is_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_claim", [False, True])
 async def test_operation_fenced_retry_refunds_claim_when_admission_deadline_expires(
     monkeypatch: pytest.MonkeyPatch,
+    cancel_during_claim: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(
@@ -2565,32 +2567,58 @@ async def test_operation_fenced_retry_refunds_claim_when_admission_deadline_expi
     )
     session.pending_requests.append(request_state)
 
-    async def claim_operation(_session: Any, state: Any) -> bool:
-        state.operation_recovery_claimed = True
-        state.operation_attempt_generation = 1
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def claim_operation(**kwargs: Any) -> bool:
+        claim_started.set()
+        await release_claim.wait()
         return True
 
     claim = AsyncMock(side_effect=claim_operation)
     mark_operation_unknown = AsyncMock(return_value=True)
-    service._durable_bridge = cast(Any, SimpleNamespace(mark_operation_unknown=mark_operation_unknown))
-    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim)
-    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            mark_operation_unknown=mark_operation_unknown,
+            claim_unknown_operation_for_recovery=claim,
+        ),
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
     monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
 
-    assert (
-        await service._retry_http_bridge_precreated_request(
+    retry_task = asyncio.create_task(
+        service._retry_http_bridge_precreated_request(
             session,
             allow_operation_fenced_continuity_replay=True,
         )
-        is False
     )
+    try:
+        await asyncio.wait_for(claim_started.wait(), timeout=2)
+        if cancel_during_claim:
+            retry_task.cancel()
+        release_claim.set()
+        if cancel_during_claim:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(retry_task, timeout=2)
+        else:
+            assert await asyncio.wait_for(retry_task, timeout=2) is False
+    finally:
+        release_claim.set()
+        await asyncio.gather(retry_task, return_exceptions=True)
 
-    claim.assert_awaited_once_with(session, request_state)
+    claim.assert_awaited_once()
     mark_operation_unknown.assert_awaited_once()
     assert mark_operation_unknown.await_args is not None
     assert mark_operation_unknown.await_args.kwargs["restore_recovery_dispatch_claim"] is True
     assert request_state.operation_recovery_claimed is False
     assert request_state.operation_attempt_generation == 0
+    assert request_state.clean_close_retry_in_progress is False
+    if cancel_during_claim:
+        reconnect.assert_not_awaited()
+    else:
+        reconnect.assert_awaited_once()
 
 
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
