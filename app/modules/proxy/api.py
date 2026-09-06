@@ -8790,6 +8790,7 @@ async def _collect_responses_payload(
             # Parseable but noncanonical acknowledgements reach this branch only for
             # the single-object stream:false HTTP JSON exchange.
             error_kind = contract_violation_kind or "invalid_json"
+            contract_violation_kind = error_kind
             terminal_result = _public_contract_error_envelope(
                 error_kind,
                 _public_contract_error_message(error_kind),

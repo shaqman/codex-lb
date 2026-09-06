@@ -95,6 +95,8 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             output_items[output_index] = cast(JsonValue, item)
             done_indexes.add(output_index)
             continue
+        if event_type in {"response.incomplete", "response.failed", "error", "response.cancelled"}:
+            return None
         if event_type != "response.completed":
             continue
         if saw_completed:
