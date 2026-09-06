@@ -720,6 +720,7 @@ async def test_rollback_fence_operation_retains_nonzero_restored_generation() ->
         await _enqueue(batcher, "restored-generation", recovery_dispatch_count=1)
         assert await batcher.flush_pending_operation(operation_id="op-1") is True
         assert durable.batches == [["restored-generation"]]
+        assert durable.terminal_rows == []
     finally:
         await batcher.close()
 

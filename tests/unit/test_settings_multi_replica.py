@@ -9,6 +9,18 @@ from app.core.config.settings import Settings
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("bound", [0, -1, 128 * 1024 * 1024 + 1])
+def test_complete_transcript_bound_rejects_unsafe_values(bound: int) -> None:
+    with pytest.raises(ValidationError, match="http_responses_session_bridge_complete_transcript_max_bytes"):
+        Settings(http_responses_session_bridge_complete_transcript_max_bytes=bound)
+
+
+@pytest.mark.parametrize("bound", [1, 8 * 1024 * 1024, 128 * 1024 * 1024])
+def test_complete_transcript_bound_accepts_endpoints(bound: int) -> None:
+    settings = Settings(http_responses_session_bridge_complete_transcript_max_bytes=bound)
+    assert settings.http_responses_session_bridge_complete_transcript_max_bytes == bound
+
+
 def test_settings_multi_replica_defaults():
     settings = Settings()
     assert settings.metrics_enabled is False

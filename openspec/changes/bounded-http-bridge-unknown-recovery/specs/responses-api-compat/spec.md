@@ -11,6 +11,10 @@ exact canonical request-body fingerprint match and a nonblank parent response
 identifier.  The proxy MUST recover only when exactly one candidate matches;
 missing, ambiguous, stale, or conflicting candidates MUST remain fail-closed.
 
+This bounded parked-candidate search MUST supplement the existing exact root
+and latest-parent UNKNOWN probes. Enabling parked recovery MUST NOT disable
+the existing root UNKNOWN recovery path.
+
 Before replay, the proxy MUST durably rebind the selected operation and fence
 its owner.  Recovery MUST remain bounded by the configured attempt limit and
 MUST emit low-cardinality diagnostics without logging request or response

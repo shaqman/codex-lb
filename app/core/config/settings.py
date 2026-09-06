@@ -381,7 +381,9 @@ class Settings(BaseSettings):
     http_responses_session_bridge_unsafe_partial_replay_enabled: bool = False
     http_responses_session_bridge_complete_transcript_max_turns: int = Field(default=256, gt=0, le=512)
     http_responses_session_bridge_complete_transcript_max_input_items: int = Field(default=4096, gt=0, le=32768)
-    http_responses_session_bridge_complete_transcript_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    http_responses_session_bridge_complete_transcript_max_bytes: int = Field(
+        default=8 * 1024 * 1024, gt=0, le=128 * 1024 * 1024
+    )
     # Keep a reconnecting client request open while an operation-fenced
     # server-side recovery waits for the hard-key retry circuit to cool down.
     # This is deliberately separate from the recovery mode because waiting

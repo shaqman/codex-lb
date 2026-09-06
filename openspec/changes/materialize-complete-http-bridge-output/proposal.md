@@ -20,6 +20,9 @@ needs.
 - Preserve synthetic snapshot roots when a continuation sends only a tool
   output delta; never duplicate the stored function call.
 - Keep malformed, incomplete, or oversized event transcripts fail-closed.
+- Preserve root UNKNOWN recovery when parked recovery is enabled, and defer
+  native task cancellation until pre-dispatch checkpoint rollback and cleanup
+  finish.
 - Add focused regression coverage for ordered output-item reconstruction.
 
 ## Impact

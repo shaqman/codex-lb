@@ -1473,8 +1473,10 @@ async def test_hard_continuity_operation_replay_falls_back_to_latest_parent_unkn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parked_recovery_enabled", [False, True])
 async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
     monkeypatch: pytest.MonkeyPatch,
+    parked_recovery_enabled: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="hard-fence-root-fallback")
@@ -1493,7 +1495,8 @@ async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
         proxy_service,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_parked_recovery_enabled=parked_recovery_enabled,
         ),
     )
     operation = SimpleNamespace(
@@ -1532,7 +1535,7 @@ async def test_hard_continuity_operation_replay_falls_back_to_root_unknown(
 
 
 @pytest.mark.asyncio
-async def test_hard_continuity_parked_recovery_skips_unbounded_root_lookup(
+async def test_hard_continuity_parked_recovery_checks_root_before_recent_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -1571,7 +1574,7 @@ async def test_hard_continuity_parked_recovery_skips_unbounded_root_lookup(
             parent_response_id=None,
             session_id=session.durable_session_id,
             state="unknown",
-            request_text=operation.request_text,
+            request_text='{"type":"response.create","input":"different root"}',
         )
     )
     recent_lookup = AsyncMock(return_value=[operation])
@@ -1590,7 +1593,7 @@ async def test_hard_continuity_parked_recovery_skips_unbounded_root_lookup(
 
     assert allowed is True
     assert reason == "operation_unknown_recent_parent"
-    root_lookup.assert_not_awaited()
+    root_lookup.assert_awaited_once()
     recent_lookup.assert_awaited_once()
 
 
@@ -9460,6 +9463,98 @@ def test_unsafe_partial_replay_keeps_sequence_numbers_monotonic() -> None:
     assert first_sequence == 8
     assert second_sequence == 9
     assert request_state.last_downstream_sequence_number == 7
+
+
+@pytest.mark.parametrize("bad_output", [None, "malformed", {}, ["malformed"]])
+@pytest.mark.asyncio
+async def test_response_output_capture_rejects_malformed_terminal_output(
+    bad_output: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="bad-terminal",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    events: list[dict[str, Any]] = [
+        {"type": "response.output_item.done", "output_index": 0, "item": {"type": "message", "id": "msg_1"}},
+        {"type": "response.completed", "response": {"output": bad_output}},
+    ]
+    for event in events:
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            state,
+            event_type=event["type"],
+            payload=event,
+        )
+    assert state.response_output_items_complete is False
+    assert state.response_output_items_event_invalid is True
+    assert state.response_output_items == []
+    assert (
+        http_bridge_upstream_events_module.materialize_output_items_from_events(
+            ["data: " + json.dumps(event) + "\n\n" for event in events]
+        )
+        is None
+    )
+    state.operation_id = "op-invalid-terminal"
+    session = _make_bridge_session(key_value="invalid-terminal")
+    session.durable_session_id = "durable-invalid-terminal"
+    session.durable_owner_epoch = 1
+    update_operation = AsyncMock(return_value=True)
+    service = SimpleNamespace(
+        _durable_bridge=SimpleNamespace(
+            update_operation=update_operation,
+            get_operation=AsyncMock(return_value=SimpleNamespace(event_spool_complete=True)),
+        )
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_instance_id="test-instance",
+        ),
+    )
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        state,
+        state="completed",
+        response_id="resp-invalid-terminal",
+    )
+    update_operation.assert_awaited_once()
+    assert update_operation.await_args is not None
+    assert update_operation.await_args.kwargs["response_output_items_complete"] is False
+    assert update_operation.await_args.kwargs["response_replay_input_complete"] is False
+
+
+@pytest.mark.parametrize("late_type", ["response.completed", "response.output_item.added", "response.output_item.done"])
+def test_response_output_capture_rejects_lifecycle_after_completion(late_type: str) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="duplicate-terminal",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+    assert state.response_output_items_complete is True
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        state,
+        event_type=late_type,
+        payload={"response": {"output": []}, "output_index": 0, "item": {"type": "message", "id": "msg_1"}},
+    )
+    assert state.response_output_items_complete is False
+    assert state.response_output_items_event_invalid is True
+    assert state.response_output_items == []
 
 
 def test_response_output_capture_reconstructs_empty_completed_output() -> None:
@@ -28117,6 +28212,63 @@ async def test_cleanup_http_bridge_submit_interruption_restores_recovery_event_f
         operation_id="operation-rebound-fence",
         recovery_dispatch_count=2,
     )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_defers_native_cancellation() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    rolled_back = False
+
+    async def rollback(**kwargs: Any) -> bool:
+        nonlocal rolled_back
+        started.set()
+        await release.wait()
+        rolled_back = True
+        return True
+
+    service._durable_bridge = cast(Any, SimpleNamespace(rollback_recovery_attempt_replayed=rollback))
+    service._maybe_release_idle_http_bridge_session_lease = AsyncMock()
+    session = _make_bridge_session(key_value="cancel-checkpoint-rollback")
+    session.durable_session_id = "durable-cancel-checkpoint"
+    session.durable_owner_epoch = 2
+    state = proxy_service._WebSocketRequestState(
+        request_id="cancel-checkpoint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        recovery_attempt_fingerprint="checkpoint",
+        recovery_attempt_claimed=True,
+    )
+    task = asyncio.create_task(
+        service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=state,
+            gate_acquired=False,
+            request_enqueued=False,
+            counted_in_queue=False,
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not rolled_back
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert rolled_back
+        assert state.recovery_attempt_claimed is False
+        assert state.recovery_attempt_fingerprint is None
+        assert state.recovery_attempt_session_id is None
+        assert state.recovery_attempt_owner_epoch is None
+        service._maybe_release_idle_http_bridge_session_lease.assert_awaited_once_with(session)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

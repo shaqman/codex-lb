@@ -3444,10 +3444,10 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
@@ -3455,7 +3455,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # carry the classifiable code only in ``type`` (or omit both code and
     # param on the terse previous-response rejection), and a raw read would
     # misclassify them into the ambiguous transport class below (issue #1830).
-    code = _normalize_error_code(raw_code, error_type)
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -3471,8 +3470,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
@@ -3483,18 +3480,15 @@ def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
-    code = _normalize_error_code(raw_code, error_type)
     if code == "bridge_previous_response_not_found":
         return True
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 

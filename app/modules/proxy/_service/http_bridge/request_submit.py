@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-import anyio
-
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -1423,7 +1421,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         )
 
-        if callable(get_root_unknown) and not parked_recovery_enabled:
+        if callable(get_root_unknown):
             operation = await _call_with_supported_optional_kwargs(
                 get_root_unknown,
                 optional_kwargs={"api_key_scope": api_key_scope},
@@ -3470,6 +3468,7 @@ class _HTTPBridgeRequestSubmitMixin:
         admission_waiter_registered: bool = False,
     ) -> None:
         retire_closed_session = False
+        rollback_cancellation: asyncio.CancelledError | None = None
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:
                 session.pending_requests.remove(request_state)
@@ -3502,19 +3501,23 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             rollback_recovery_attempt = getattr(self._durable_bridge, rollback_method, None)
             if callable(rollback_recovery_attempt):
-                try:
-                    with anyio.CancelScope(shield=True):
-                        rolled_back = bool(
-                            await _call_with_supported_optional_kwargs(
-                                rollback_recovery_attempt,
-                                optional_kwargs={},
-                                session_id=recovery_session_id,
-                                api_key_id=session.key.api_key_id,
-                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                                owner_epoch=recovery_owner_epoch,
-                                request_fingerprint=request_state.recovery_attempt_fingerprint,
-                            )
+
+                async def rollback_checkpoint() -> bool:
+                    return bool(
+                        await _call_with_supported_optional_kwargs(
+                            rollback_recovery_attempt,
+                            optional_kwargs={},
+                            session_id=recovery_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_owner_epoch,
+                            request_fingerprint=request_state.recovery_attempt_fingerprint,
                         )
+                    )
+
+                try:
+                    rollback_task = asyncio.create_task(rollback_checkpoint())
+                    rolled_back, rollback_cancellation = await _await_task_deferring_cancellation(rollback_task)
                     if rolled_back and request_state.recovery_attempt_claimed:
                         request_state.recovery_attempt_claimed = False
                         request_state.recovery_attempt_fingerprint = None
@@ -3660,6 +3663,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 allow_liveness_revive=False,
             )
         await self._maybe_release_idle_http_bridge_session_lease(session)
+
+        if rollback_cancellation is not None:
+            raise rollback_cancellation
 
     async def _http_bridge_fair_share_threshold_pct(
         self: Any,

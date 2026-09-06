@@ -11,6 +11,9 @@ The proxy MUST reject reconstruction when the terminal completion is missing,
 an output item is malformed or unfinished, or the configured transcript bound
 would be exceeded.
 
+The configured transcript byte bound MUST be positive and MUST NOT exceed
+128 MiB.
+
 The proxy MUST reject reconstruction when more than one terminal completion is
 present, when output-item indexes are sparse or reused, or when a present
 terminal `output` value is not a list. When both streamed output items and a
@@ -18,11 +21,16 @@ non-empty terminal output are present, each item MUST have matching stable
 identity fields (`id`, `call_id`, and `type` when provided) before payload
 comparison; an omitted terminal `status` MAY be tolerated.
 
-When complete-transcript recovery is enabled, the proxy MUST make a best-effort
-attempt to persist a bounded, self-contained replay-input snapshot for each
-completed operation. The snapshot MUST omit stale response anchors and
+When complete-transcript recovery is enabled, only after establishing a complete,
+unambiguous durable transcript, the proxy MUST make a best-effort attempt to
+persist a bounded, self-contained replay-input snapshot for that completed
+operation. The snapshot MUST omit stale response anchors and
 response-owned item IDs, and MUST NOT delay or fail the live response if it
 cannot be built.
+
+Pre-dispatch recovery checkpoint rollback MUST finish before native task
+cancellation propagates, and successful rollback MUST clear its in-memory
+claim before the remaining submit cleanup completes.
 
 When a complete replay-input snapshot is available, recovery MUST use it as
 the fresh request input even if an upstream parent response is no longer

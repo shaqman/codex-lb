@@ -217,6 +217,7 @@ from app.modules.proxy.complete_transcript import (
     _output_item_identities_match,
     _output_item_identity,
     _output_item_identity_is_valid,
+    _terminal_output_is_valid,
     build_complete_replay_payload,
     build_replay_input_snapshot,
     build_unanchored_root_replay_payload,
@@ -1358,6 +1359,13 @@ def _record_http_bridge_response_output(
     """Capture the canonical terminal output for durable transcript replay."""
     if not isinstance(payload, dict):
         return
+    if event_type in {"response.output_item.added", "response.output_item.done", "response.completed"} and (
+        request_state.response_output_items_complete or request_state.response_output_items_event_invalid
+    ):
+        request_state.response_output_items_event_invalid = True
+        request_state.response_output_items_complete = False
+        request_state.response_output_items = []
+        return
     if event_type == "response.output_item.added":
         output_index = payload.get("output_index")
         item = payload.get("item")
@@ -1408,8 +1416,14 @@ def _record_http_bridge_response_output(
     if unfinished_added_indexes or request_state.response_output_items_event_invalid:
         request_state.response_output_items = []
         request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
         return
     response = payload.get("response")
+    if not _terminal_output_is_valid(response):
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
+        return
     output = response.get("output") if isinstance(response, dict) else None
     if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
         if request_state.response_output_items_by_index:
@@ -1428,6 +1442,7 @@ def _record_http_bridge_response_output(
         # transcript. The operation will remain fail-closed for reconstruction.
         request_state.response_output_items = []
         request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
         return
     if request_state.response_output_items_by_index:
         output_indexes = sorted(request_state.response_output_items_by_index)

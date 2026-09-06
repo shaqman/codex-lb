@@ -21,6 +21,13 @@ _LEGACY_TURN_METADATA_FIELDS = frozenset({"turn_id"})
 _LEGACY_INTERNAL_METADATA_FIELDS = frozenset({"create_time", "turn_id"})
 
 
+def _terminal_output_is_valid(response: JsonValue) -> bool:
+    if not isinstance(response, dict) or "output" not in response:
+        return True
+    output = response["output"]
+    return isinstance(output, list) and all(isinstance(item, dict) for item in output)
+
+
 def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValue] | None:
     """Recover terminal output items from the durable SSE event spool.
 
@@ -96,10 +103,10 @@ def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValu
             return None
         saw_completed = True
         response = payload.get("response")
+        if not _terminal_output_is_valid(response):
+            return None
         output = response.get("output") if isinstance(response, dict) else None
         if output is not None:
-            if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
-                return None
             completed_output = cast(list[JsonValue], output)
 
     if not saw_completed or added_indexes - done_indexes:

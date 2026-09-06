@@ -19,6 +19,9 @@
 
 ## 2. Verification
 
+- [x] 2.5 Align live terminal validation with durable materialization for malformed
+  output and duplicate completions, and verify recovery rejects both.
+
 - [x] 2.1 Add focused unit coverage for empty terminal output and missing completion.
 - [x] 2.2 Add coverage for snapshot bounds and recovery after parent-chain purge.
 - [x] 2.3 Add coverage for root-operation registration and fingerprint scoping.
