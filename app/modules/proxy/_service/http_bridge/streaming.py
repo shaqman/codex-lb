@@ -3384,7 +3384,7 @@ class _HTTPBridgeStreamingMixin:
                 api_key_id: str | None,
                 owner_epoch: int | None,
                 request_fingerprint: str | None,
-            ) -> bool:
+            ) -> tuple[bool, asyncio.CancelledError | None]:
                 """Return a pre-dispatch REPLAYED journal row to UNKNOWN."""
                 rollback_recovery_attempt = getattr(
                     self._durable_bridge,
@@ -3397,7 +3397,7 @@ class _HTTPBridgeStreamingMixin:
                     or owner_epoch is None
                     or request_fingerprint is None
                 ):
-                    return False
+                    return False, None
                 try:
                     # A cancellation must not interrupt the compensating
                     # transaction; the caller re-raises it after rollback.
@@ -3410,15 +3410,17 @@ class _HTTPBridgeStreamingMixin:
                             request_fingerprint=request_fingerprint,
                         )
                     )
-                    rolled_back, _ = await _await_task_deferring_cancellation(rollback_task)
-                    return bool(rolled_back)
+                    rolled_back, rollback_cancellation = await _await_task_deferring_cancellation(rollback_task)
+                    return bool(rolled_back), rollback_cancellation
+                except asyncio.CancelledError as cancellation:
+                    return False, cancellation
                 except BaseException:
                     logger.warning(
                         "Failed to roll back claimed HTTP bridge recovery checkpoint request_id=%s",
                         request_state.request_id,
                         exc_info=True,
                     )
-                    return False
+                    return False, None
 
             async def claim_recovery_attempt_for_local_replay() -> None:
                 """Fence an origin journal before dispatching its replacement request."""
@@ -3988,7 +3990,7 @@ class _HTTPBridgeStreamingMixin:
                         retry_preferred_account_id = None
                         allow_previous_response_recovery_rebind = False
                     except BaseException:
-                        rolled_back = await rollback_claimed_recovery_attempt(
+                        rolled_back, rollback_cancellation = await rollback_claimed_recovery_attempt(
                             session_id=recovery_origin_session_id,
                             api_key_id=bridge_session_key.api_key_id,
                             owner_epoch=recovery_origin_owner_epoch,
@@ -4000,6 +4002,8 @@ class _HTTPBridgeStreamingMixin:
                             request_state.recovery_attempt_fingerprint = None
                             request_state.recovery_attempt_session_id = None
                             request_state.recovery_attempt_owner_epoch = None
+                        if rollback_cancellation is not None:
+                            raise rollback_cancellation
                         raise
                 else:
                     durable_recovery_attempt_available = False
@@ -4157,7 +4161,7 @@ class _HTTPBridgeStreamingMixin:
                     allow_previous_response_recovery_rebind = False
                 except BaseException:
                     if recovery_claimed_here:
-                        rolled_back = await rollback_claimed_recovery_attempt(
+                        rolled_back, rollback_cancellation = await rollback_claimed_recovery_attempt(
                             session_id=recovery_origin_session_id,
                             api_key_id=recovery_origin_api_key_id,
                             owner_epoch=recovery_origin_owner_epoch,
@@ -4168,6 +4172,8 @@ class _HTTPBridgeStreamingMixin:
                             request_state.recovery_attempt_fingerprint = None
                             request_state.recovery_attempt_session_id = None
                             request_state.recovery_attempt_owner_epoch = None
+                        if rollback_cancellation is not None:
+                            raise rollback_cancellation
                     raise
             elif previous_response_rejected_same_owner_full_resend:
                 # The owner-pinned replacement does not bypass the source
@@ -4235,7 +4241,7 @@ class _HTTPBridgeStreamingMixin:
                     allow_previous_response_recovery_rebind = False
                 except BaseException:
                     if recovery_claimed_here:
-                        rolled_back = await rollback_claimed_recovery_attempt(
+                        rolled_back, rollback_cancellation = await rollback_claimed_recovery_attempt(
                             session_id=recovery_origin_session_id,
                             api_key_id=recovery_origin_api_key_id,
                             owner_epoch=recovery_origin_owner_epoch,
@@ -4246,6 +4252,8 @@ class _HTTPBridgeStreamingMixin:
                             request_state.recovery_attempt_fingerprint = None
                             request_state.recovery_attempt_session_id = None
                             request_state.recovery_attempt_owner_epoch = None
+                        if rollback_cancellation is not None:
+                            raise rollback_cancellation
                     raise
             else:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:

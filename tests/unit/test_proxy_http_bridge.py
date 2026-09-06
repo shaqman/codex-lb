@@ -37412,12 +37412,13 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_during_journal_claim", [False, True])
+@pytest.mark.parametrize("cancellation_stage", [None, "claim_and_rollback", "rollback_only"])
 async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without_continuity_provenance(
     monkeypatch: pytest.MonkeyPatch,
-    cancel_during_journal_claim: bool,
+    cancellation_stage: str | None,
 ) -> None:
     """A session-injected anchor must not let the fresh replay switch accounts."""
+    cancel_during_journal_claim = cancellation_stage is not None
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     prefix = {"role": "user", "content": [{"type": "input_text", "text": "first"}]}
     full_input = [
@@ -37609,6 +37610,12 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         )
         monkeypatch.setattr(service._durable_bridge, "mark_recovery_attempt_replayed", delayed_claim)
         monkeypatch.setattr(service._durable_bridge, "rollback_recovery_attempt_replayed", rollback_claim)
+        if cancellation_stage == "rollback_only":
+            monkeypatch.setattr(
+                service._durable_bridge,
+                "reset_operation_event_spool",
+                AsyncMock(side_effect=RuntimeError("spool reset failed")),
+            )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -37645,7 +37652,8 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
     if cancel_during_journal_claim:
         task = asyncio.create_task(collect())
         await asyncio.wait_for(claim_started.wait(), timeout=5)
-        task.cancel()
+        if cancellation_stage == "claim_and_rollback":
+            task.cancel()
         release_claim.set()
         await asyncio.wait_for(rollback_started.wait(), timeout=5)
         task.cancel()
