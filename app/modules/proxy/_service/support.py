@@ -1153,6 +1153,7 @@ class _WebSocketRequestState:
     # Generation observed before a transcript-recovery rebind. Cleanup uses
     # this compare-and-set value to avoid rolling back a concurrent winner.
     operation_recovery_expected_generation: int | None = None
+    operation_rebind_claim_id: str | None = None
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.

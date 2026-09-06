@@ -2738,8 +2738,27 @@ async def test_rebind_rollback_requires_the_claimed_recovery_generation(
             model="gpt-5.6",
             request_text='{"type":"response.create","input":[]}',
             expected_recovery_dispatch_count=0,
+            rebind_claim_id="winning-rebind-claim",
         )
         assert first_rebind is not None and first_rebind.recovery_dispatch_count == 1
+        assert first_rebind.rebind_claim_id == "winning-rebind-claim"
+
+        # A losing caller can have the same expected generation but cannot
+        # compensate the winner with its own unique attempt identity.
+        for losing_claim in (None, "losing-rebind-claim"):
+            assert not await repository.rollback_operation_before_dispatch(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-rebind-cas",
+                owner_epoch=claim.owner_epoch,
+                restore_rebound=True,
+                expected_recovery_dispatch_count=0,
+                rebind_claim_id=losing_claim,
+            )
+        winner = await repository.get_operation(operation_id=operation_id)
+        assert winner is not None and winner.state == "submitted"
+        assert winner.recovery_dispatch_count == 1
+        assert winner.rebind_claim_id == "winning-rebind-claim"
 
         assert await repository.rollback_operation_before_dispatch(
             operation_id=operation_id,
@@ -2748,11 +2767,13 @@ async def test_rebind_rollback_requires_the_claimed_recovery_generation(
             owner_epoch=claim.owner_epoch,
             restore_rebound=True,
             expected_recovery_dispatch_count=0,
+            rebind_claim_id="winning-rebind-claim",
         )
         refunded = await repository.get_operation(operation_id=operation_id)
         assert refunded is not None
         assert refunded.state == "failed"
         assert refunded.recovery_dispatch_count == 0
+        assert refunded.rebind_claim_id is None
 
         # A later retry can re-submit the refunded failed row and advance the
         # generation twice, representing a newer concurrent winner.

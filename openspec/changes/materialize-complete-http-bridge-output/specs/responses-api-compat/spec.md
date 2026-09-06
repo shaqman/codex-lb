@@ -41,6 +41,12 @@ Initial admission claims and local replay journal claims MUST also defer
 cancellation until their durable result and in-memory ownership are recorded.
 A committed pre-dispatch claim MUST be refunded on cancellation.
 
+Complete-transcript operation rebinds MUST persist a unique per-attempt claim
+identity. Compensation MUST match that identity as well as the expected
+generation and owner, so a caller whose transaction result is ambiguous cannot
+roll back a concurrent winner at the same generation. The identity MUST follow
+the replacement request into pre-dispatch cleanup.
+
 Grouped terminal delivery MUST preserve cancellation received while awaiting
 sibling delivery barriers, including the early barrier after a successful
 terminal append. Cancellation MUST propagate after the delivery barrier completes.

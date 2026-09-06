@@ -745,6 +745,7 @@ class DurableBridgeSessionCoordinator:
         request_text: str,
         allow_acknowledged: bool = False,
         expected_recovery_dispatch_count: int | None = None,
+        rebind_claim_id: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).rebind_operation_for_complete_transcript(
@@ -757,6 +758,7 @@ class DurableBridgeSessionCoordinator:
                 request_text=request_text,
                 allow_acknowledged=allow_acknowledged,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                rebind_claim_id=rebind_claim_id,
             )
 
     async def get_operation_events(self, *, operation_id: str) -> list[str]:
@@ -1078,6 +1080,7 @@ class DurableBridgeSessionCoordinator:
         rebound_from_model: str | None = None,
         rebound_from_parent_response_id: str | None = None,
         expected_recovery_dispatch_count: int | None = None,
+        rebind_claim_id: str | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).rollback_operation_before_dispatch(
@@ -1091,6 +1094,7 @@ class DurableBridgeSessionCoordinator:
                 rebound_from_model=rebound_from_model,
                 rebound_from_parent_response_id=rebound_from_parent_response_id,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                rebind_claim_id=rebind_claim_id,
             )
 
     async def get_operation_by_fingerprint(

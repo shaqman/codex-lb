@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 import anyio
 
@@ -1652,6 +1653,7 @@ async def _try_complete_transcript_recovery(
         return False
 
     operation_event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    rebind_claim_id = str(uuid4())
     fence_operation = getattr(operation_event_batcher, "fence_operation", None)
     rollback_fence_operation = getattr(operation_event_batcher, "rollback_fence_operation", None)
 
@@ -1698,6 +1700,7 @@ async def _try_complete_transcript_recovery(
                     rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
                     rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
                     expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                    rebind_claim_id=rebind_claim_id,
                 )
             )
             if rolled_back and callable(rollback_fence_operation):
@@ -1782,6 +1785,7 @@ async def _try_complete_transcript_recovery(
             model=request_state.model,
             request_text=replay_text,
             expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+            rebind_claim_id=rebind_claim_id,
         )
     )
     try:
@@ -1920,6 +1924,7 @@ async def _try_complete_transcript_recovery(
     request_state.operation_registered = True
     request_state.operation_rebind_required = False
     request_state.operation_rebound = True
+    request_state.operation_rebind_claim_id = rebind_claim_id
     request_state.operation_rebound_from_session_id = getattr(rebound_operation, "rebound_from_session_id", None)
     request_state.operation_rebound_from_account_id = getattr(rebound_operation, "rebound_from_account_id", None)
     request_state.operation_rebound_from_model = getattr(rebound_operation, "rebound_from_model", None)

@@ -215,6 +215,7 @@ class DurableBridgeOperationSnapshot:
     state: str
     response_id: str | None
     recovery_dispatch_count: int = 0
+    rebind_claim_id: str | None = None
     request_text: str | None = None
     event_spool_complete: bool = True
     transcript_version: int = 0
@@ -1894,6 +1895,7 @@ class DurableBridgeRepository:
                     if request_text is not None:
                         operation.request_text = request_text
                     operation.state = "submitted"
+                    operation.rebind_claim_id = None
                     operation.response_id = None
                     # A failed attempt is a new replay attempt.  Remove the
                     # previous attempt's SSE spool atomically so a later
@@ -1981,6 +1983,7 @@ class DurableBridgeRepository:
         request_text: str,
         allow_acknowledged: bool = False,
         expected_recovery_dispatch_count: int | None = None,
+        rebind_claim_id: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         """Atomically replace a pending operation with a complete replay.
 
@@ -2039,6 +2042,7 @@ class DurableBridgeRepository:
             operation.account_id = account_id
             operation.model = model
             operation.parent_response_id = None
+            operation.rebind_claim_id = rebind_claim_id
             operation.request_text = request_text
             operation.state = "submitted"
             operation.response_id = None
@@ -2354,6 +2358,7 @@ class DurableBridgeRepository:
                 return False
             await self._delete_operation_spool_material((operation_id,))
             operation.state = "submitted"
+            operation.rebind_claim_id = None
             operation.response_id = None
             operation.recovery_dispatch_count += 1
             operation.event_bytes = 0
@@ -2437,6 +2442,7 @@ class DurableBridgeRepository:
         rebound_from_model: str | None = None,
         rebound_from_parent_response_id: str | None = None,
         expected_recovery_dispatch_count: int | None = None,
+        rebind_claim_id: str | None = None,
     ) -> bool:
         """Undo an operation transition that never reached upstream."""
         async with sqlite_writer_section():
@@ -2457,6 +2463,7 @@ class DurableBridgeRepository:
                     HttpBridgeOperationRecord.state == "submitted",
                     HttpBridgeOperationRecord.response_id.is_(None),
                     HttpBridgeOperationRecord.event_bytes == 0,
+                    HttpBridgeOperationRecord.rebind_claim_id == rebind_claim_id,
                     *(
                         [HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count + 1]
                         if expected_recovery_dispatch_count is not None
@@ -2473,6 +2480,7 @@ class DurableBridgeRepository:
                 return False
             if restore_rebound:
                 operation.state = "failed"
+                operation.rebind_claim_id = None
                 operation.event_spool_complete = False
                 if expected_recovery_dispatch_count is not None:
                     # Rebind increments the generation before dispatch. A
@@ -4645,6 +4653,7 @@ def _to_operation_snapshot(
         state=row.state,
         response_id=row.response_id,
         recovery_dispatch_count=row.recovery_dispatch_count,
+        rebind_claim_id=getattr(row, "rebind_claim_id", None),
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
         transcript_version=int(row.transcript_version or 0),

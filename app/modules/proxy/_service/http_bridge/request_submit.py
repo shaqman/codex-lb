@@ -3622,6 +3622,7 @@ class _HTTPBridgeRequestSubmitMixin:
             if callable(rollback_operation):
                 try:
                     rollback_optional_kwargs = {
+                        "rebind_claim_id": request_state.operation_rebind_claim_id,
                         "restore_rebound": request_state.operation_rebound,
                         "rebound_from_session_id": request_state.operation_rebound_from_session_id,
                         "rebound_from_account_id": request_state.operation_rebound_from_account_id,
@@ -3670,6 +3671,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             )
                     request_state.operation_registered = False
                     request_state.operation_created = False
+                    request_state.operation_rebind_claim_id = None
                     if request_state.operation_rebound:
                         # The failed durable row was restored rather than
                         # deleted. Preserve its identity so a capacity/gate

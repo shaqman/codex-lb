@@ -1794,6 +1794,41 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'rebind-claim.sqlite'}"
+    parent = "20260904_000000_repair_http_bridge_ownership_registry"
+    revision = "20260906_000000_add_http_bridge_rebind_claim"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+
+    async def columns():
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_operations")
+                }
+            )
+
+    try:
+        before = await columns()
+        assert "rebind_claim_id" not in before
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        assert await columns() == before | {"rebind_claim_id"}
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
+        assert await columns() == before
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        assert await columns() == before | {"rebind_claim_id"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_path):
     from datetime import datetime, timezone
 

@@ -8794,6 +8794,11 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     assert rollback_operation.await_args.kwargs["rebound_from_account_id"] == "original-account"
     assert rollback_operation.await_args.kwargs["rebound_from_model"] == "original-model"
     assert rollback_operation.await_args.kwargs["rebound_from_parent_response_id"] == "resp-original-parent"
+    assert rebind_operation.await_args is not None
+    assert (
+        rollback_operation.await_args.kwargs["rebind_claim_id"] == rebind_operation.await_args.kwargs["rebind_claim_id"]
+    )
+    assert rollback_operation.await_args.kwargs["rebind_claim_id"]
     assert request_state.operation_registered is False
     assert request_state.operation_rebind_required is True
 
@@ -28766,6 +28771,7 @@ async def test_submit_hard_turn_rolls_back_operation_before_retiring_session(
     rollback_kwargs = rollback_call.kwargs
     assert rollback_kwargs == {
         "operation_id": "operation-unsent",
+        "rebind_claim_id": None,
         "session_id": "durable-hard-turn-unsent-operation",
         "instance_id": "instance-hard-turn-unsent-operation",
         "owner_epoch": 3,
@@ -37637,8 +37643,10 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
         if len(stream_attempts) == 1:
             assert request_state.previous_response_id == "resp-stale-anchor", stream_attempts
             request_state.operation_recovery_expected_generation = 7
+            request_state.operation_rebind_claim_id = "replacement-claim"
             raise stale_rejection
         assert request_state.operation_recovery_expected_generation == 7
+        assert request_state.operation_rebind_claim_id == "replacement-claim"
         yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(
