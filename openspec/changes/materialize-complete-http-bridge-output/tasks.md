@@ -19,6 +19,9 @@
 
 ## 2. Verification
 
+- [x] 2.15 Omit hosted-tool bookkeeping only after completed status; reject
+  unfinished hosted work in durable output and client history before replay.
+
 - [x] 2.13 Discard all response data after the first terminal event, including
   late text, reasoning, content-part, tool-argument, and lifecycle frames.
 

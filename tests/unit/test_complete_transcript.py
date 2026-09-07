@@ -54,6 +54,56 @@ def _turn(
     return DurableBridgeTranscriptTurn(operation=operation, events=(), response_output_items_json=json.dumps(output))
 
 
+@pytest.mark.parametrize("item_type", ["web_search_call", "tool_search_call", "tool_search_output"])
+@pytest.mark.parametrize("status", [None, "in_progress", "searching", "failed", "completed"])
+@pytest.mark.parametrize("source", ["durable_output", "durable_input", "continuation", "root", "snapshot_output"])
+def test_replay_rejects_unfinished_hosted_tool_envelopes(item_type: str, status: str | None, source: str) -> None:
+    hosted: dict[str, object] = {"type": item_type, "id": "hosted_1"}
+    if status is not None:
+        hosted["status"] = status
+    user: dict[str, object] = {"type": "message", "role": "user", "content": "question"}
+    assistant: dict[str, object] = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "answer"}],
+    }
+    if source == "root":
+        replay = build_unanchored_root_replay_payload(json.dumps({"model": "gpt-test", "input": [user, hosted]}))
+    elif source == "snapshot_output":
+        replay = build_replay_input_snapshot(
+            [],
+            request_text=json.dumps({"model": "gpt-test", "input": [user]}),
+            response_output_items_json=json.dumps([hosted, assistant]),
+        )
+    else:
+        turn = _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[user, hosted] if source == "durable_input" else [user],
+            output=[hosted, assistant] if source == "durable_output" else [assistant],
+        )
+        replay = build_complete_replay_payload(
+            [turn],
+            continuation_request_text=json.dumps(
+                {
+                    "model": "gpt-test",
+                    "previous_response_id": "resp_1",
+                    "input": [hosted, user] if source == "continuation" else [user],
+                }
+            ),
+        )
+    if status == "completed":
+        assert replay is not None
+        parsed = json.loads(replay)
+        items = parsed if source == "snapshot_output" else parsed["input"]
+        assert items
+        assert all(item.get("type") != item_type for item in items)
+    else:
+        assert replay is None
+
+
 def test_build_complete_replay_payload_inserts_prior_assistant_output() -> None:
     turns = [
         _turn(

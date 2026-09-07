@@ -47,6 +47,9 @@ across successive account-recovery waits.
 Public response streams MUST NOT forward response data after the first terminal
 event, including late content deltas and nonterminal lifecycle frames. SSE
 comments and the final `[DONE]` marker MAY still be forwarded.
+Hosted-tool envelopes MUST be omitted from replay only when their status is
+`completed`. Missing, unfinished, or failed hosted-tool status MUST NOT authorize
+account-neutral replay from durable output or client-supplied history.
 
 Security-work replay MUST clear the interrupted attempt's pending and added
 tool-call manifest entries and invalid-manifest marker before reconnecting.

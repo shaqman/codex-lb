@@ -703,7 +703,10 @@ def _strip_omitted_output_subsequence(items: list[JsonValue], subsequence: list[
 
 
 def _is_omitted_output_item(item: JsonValue) -> bool:
-    return isinstance(item, dict) and item.get("type") in _OMIT_OUTPUT_TYPES
+    return isinstance(item, dict) and (
+        item.get("type") == "reasoning"
+        or (item.get("type") in _OMIT_OUTPUT_TYPES and item.get("status") == "completed")
+    )
 
 
 def _output_item_identity(item: Mapping[str, JsonValue]) -> dict[str, str]:
@@ -787,7 +790,9 @@ def _sanitize_output_items(raw: str) -> list[JsonValue] | None:
             return None
         item_type = item.get("type")
         if item_type in _OMIT_OUTPUT_TYPES:
-            continue
+            if _is_omitted_output_item(item):
+                continue
+            return None
         if not isinstance(item_type, str):
             return None
         sanitized_item = _sanitize_replay_item(item)
