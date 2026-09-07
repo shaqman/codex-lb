@@ -1381,11 +1381,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         if operation is not None:
             return operation, None
-        if (
-            request_state.previous_response_id is not None
-            and not request_state.proxy_injected_previous_response_id
-            and callable(get_operation_by_fingerprint)
-        ):
+        if request_state.previous_response_id is not None and callable(get_operation_by_fingerprint):
             # ``_text_without_account_installation_id`` began canonicalizing
             # JSON object order in a later deploy.  An anchored retry may still
             # carry the pre-canonical fingerprint; probe that exact legacy

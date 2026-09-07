@@ -31419,7 +31419,6 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     upstream_payload = {
         "type": "response.failed",
         "response": {
-            "id": "resp_ws_precreated_fail",
             "status": "failed",
             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -31539,7 +31538,13 @@ async def test_process_upstream_websocket_text_retries_account_model_rejection_w
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_does_not_replay_id_bearing_account_model_failure(monkeypatch):
+@pytest.mark.parametrize(
+    "error_code",
+    ["invalid_request_error", *sorted(proxy_service._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES)],
+)
+async def test_process_upstream_websocket_text_does_not_replay_id_bearing_account_model_failure(
+    monkeypatch, error_code
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -31568,8 +31573,12 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_accoun
             "status": "failed",
             "error": {
                 "type": "invalid_request_error",
-                "code": "invalid_request_error",
-                "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                "code": error_code,
+                "message": (
+                    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."
+                    if error_code == "invalid_request_error"
+                    else "Upstream temporarily unavailable"
+                ),
             },
         },
     }
@@ -31588,9 +31597,12 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_accoun
 
     assert downstream_text == upstream_text
     assert upstream_control.replay_request_state is None
+    assert upstream_control.reconnect_requested is False
     assert pending_request.replay_count == 0
     assert list(pending_requests) == []
     finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args is not None
+    assert finalize_request_state.await_args.kwargs["payload"]["response"]["id"] == "resp_ws_id_bearing_model_failure"
     handle_stream_error.assert_not_awaited()
 
 
@@ -31644,6 +31656,7 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_auth_f
     assert downstream_text == upstream_text
     handle_precreated_auth_failure.assert_not_awaited()
     assert upstream_control.replay_request_state is None
+    assert upstream_control.reconnect_requested is False
     assert pending_request.replay_count == 0
     assert list(pending_requests) == []
     finalize_request_state.assert_awaited_once()
@@ -31892,7 +31905,6 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
     upstream_payload = {
         "type": "response.failed",
         "response": {
-            "id": "resp_owner_limit",
             "status": "failed",
             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -32939,7 +32951,6 @@ async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_s
                     {
                         "type": "response.failed",
                         "response": {
-                            "id": "resp_ws_sticky_retry_fail",
                             "status": "failed",
                             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
                             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},

@@ -537,7 +537,9 @@ async def _sleep_for_account_selection_recovery(
         request_state.account_capacity_waiting = True
         request_state.account_capacity_wait_reason = selection.error_message
         request_state.account_capacity_wait_started_at = (
-            request_state.account_capacity_wait_started_at or clock.monotonic()
+            request_state.account_capacity_wait_started_at
+            if request_state.account_capacity_wait_started_at is not None
+            else clock.monotonic()
         )
         request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
 

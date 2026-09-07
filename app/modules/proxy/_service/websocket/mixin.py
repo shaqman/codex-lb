@@ -5810,7 +5810,7 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
-        if response_id is not None and is_previous_response_not_found_event:
+        if response_id is not None:
             # A terminal frame carrying a response identity belongs to an
             # already selected response.  Even if its error payload matches a
             # retry classifier (for example, an invalid previous anchor or a

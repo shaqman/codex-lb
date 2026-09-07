@@ -37,6 +37,13 @@ second time.
 Ambiguous-rebind compensation for complete and unsafe-partial recovery MUST
 finish both durable rollback and event-fence restoration before propagating
 native cancellation, including repeated cancellation.
+If compensation fails, recovery MUST retain the operation identity, claim,
+expected generation, and restoration metadata for another fenced cleanup
+attempt, without authorizing or dispatching replacement work.
+Identity-bearing WebSocket terminal errors MUST settle without transparent
+replay or reconnect, regardless of retry error classification. Capacity-wait
+elapsed time MUST retain the first monotonic timestamp, including zero,
+across successive account-recovery waits.
 
 Security-work replay MUST clear the interrupted attempt's pending and added
 tool-call manifest entries and invalid-manifest marker before reconnecting.

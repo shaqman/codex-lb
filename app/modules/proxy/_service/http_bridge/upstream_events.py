@@ -215,6 +215,7 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.complete_transcript import (
+    _items_match_for_echo,
     _output_item_identities_match,
     _output_item_identity,
     _output_item_identity_is_valid,
@@ -226,7 +227,7 @@ from app.modules.proxy.complete_transcript import (
     materialize_output_items_from_events,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
-from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope
+from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot, durable_bridge_api_key_scope
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     is_upstream_model_capacity_error,
@@ -1462,8 +1463,15 @@ def _record_http_bridge_response_output(
             for index in sorted(request_state.response_output_items_by_index)
         ]
         if len(output) != len(indexed_output) or any(
-            json.dumps(terminal_item, sort_keys=True, separators=(",", ":"))
-            != json.dumps(indexed_item, sort_keys=True, separators=(",", ":"))
+            not isinstance(indexed_item, dict)
+            or not isinstance(terminal_item, dict)
+            or not _output_item_identities_match(
+                _output_item_identity(indexed_item), _output_item_identity(terminal_item)
+            )
+            or not _output_item_identities_match(
+                _output_item_identity(terminal_item), _output_item_identity(indexed_item)
+            )
+            or not _items_match_for_echo(terminal_item, indexed_item)
             for terminal_item, indexed_item in zip(output, indexed_output)
         ):
             request_state.response_output_items = []
@@ -1483,6 +1491,30 @@ def _record_http_bridge_response_output(
         return
     request_state.response_output_items = cast(list[JsonValue], output)
     request_state.response_output_items_complete = True
+
+
+def _retain_rebind_for_cleanup(
+    request_state: _WebSocketRequestState,
+    rebound_operation: DurableBridgeOperationSnapshot,
+    *,
+    rebind_claim_id: str,
+    expected_generation: int,
+) -> None:
+    """Preserve the exact claim for another pre-dispatch compensation attempt."""
+    request_state.operation_id = rebound_operation.operation_id
+    request_state.operation_registered = True
+    request_state.operation_created = False
+    request_state.operation_rebound = True
+    request_state.operation_rebind_required = True
+    request_state.operation_dispatched = False
+    request_state.operation_recovery_claimed = False
+    request_state.operation_rebind_claim_id = rebind_claim_id
+    request_state.operation_recovery_expected_generation = expected_generation
+    request_state.operation_attempt_generation = expected_generation + 1
+    request_state.operation_rebound_from_session_id = rebound_operation.rebound_from_session_id
+    request_state.operation_rebound_from_account_id = rebound_operation.rebound_from_account_id
+    request_state.operation_rebound_from_model = rebound_operation.rebound_from_model
+    request_state.operation_rebound_from_parent_response_id = rebound_operation.rebound_from_parent_response_id
 
 
 async def _try_complete_transcript_recovery(
@@ -1680,6 +1712,13 @@ async def _try_complete_transcript_recovery(
     async def rollback_rebound_operation(rebound_operation: Any) -> bool:
         rollback_task = scheduler_for(service).create_task(rollback_rebound_operation_impl(rebound_operation))
         rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if not rolled_back:
+            _retain_rebind_for_cleanup(
+                request_state,
+                rebound_operation,
+                rebind_claim_id=rebind_claim_id,
+                expected_generation=expected_recovery_dispatch_count,
+            )
         if cancellation is not None:
             raise cancellation
         return rolled_back
@@ -1835,7 +1874,8 @@ async def _try_complete_transcript_recovery(
                 rebound_from_parent_response_id=original_operation.parent_response_id,
             )
             with anyio.CancelScope(shield=True):
-                await rollback_rebound_operation(rollback_snapshot)
+                if not await rollback_rebound_operation(rollback_snapshot):
+                    return False
         logger.warning(
             "Complete HTTP bridge transcript recovery operation rebind failed request_id=%s",
             request_state.request_id,
@@ -2212,6 +2252,13 @@ async def _try_unsafe_partial_transcript_recovery(
     async def rollback_rebound_operation(rebound_operation: Any) -> bool:
         rollback_task = scheduler_for(service).create_task(rollback_rebound_operation_impl(rebound_operation))
         rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if not rolled_back:
+            _retain_rebind_for_cleanup(
+                request_state,
+                rebound_operation,
+                rebind_claim_id=rebind_claim_id,
+                expected_generation=expected_recovery_dispatch_count,
+            )
         if cancellation is not None:
             raise cancellation
         return rolled_back
@@ -2358,7 +2405,8 @@ async def _try_unsafe_partial_transcript_recovery(
                 rebound_from_parent_response_id=original_operation.parent_response_id,
             )
             with anyio.CancelScope(shield=True):
-                await rollback_rebound_operation(rollback_snapshot)
+                if not await rollback_rebound_operation(rollback_snapshot):
+                    return False
         logger.warning(
             "Unsafe HTTP bridge partial transcript recovery operation rebind failed request_id=%s",
             getattr(request_state, "request_id", None),

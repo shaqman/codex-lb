@@ -558,7 +558,8 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     )
 
     async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
-        return next(completed_operations)
+        # Once the chain is exhausted, canonical and legacy probes both miss.
+        return next(completed_operations, None)
 
     async def get_operation(**_kwargs: Any) -> None:
         return None
@@ -1094,7 +1095,8 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
     recorded: dict[str, Any] = {}
 
     async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
-        return next(operation_lookups)
+        # The exhausted repository also returns no row for the legacy probe.
+        return next(operation_lookups, None)
 
     async def get_operation(**_kwargs: Any) -> None:
         return None
@@ -1190,7 +1192,7 @@ async def test_submit_operation_ledger_revalidates_anchor_after_final_generation
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
-            get_operation_by_fingerprint=AsyncMock(side_effect=lambda **_kwargs: next(operation_lookups)),
+            get_operation_by_fingerprint=AsyncMock(side_effect=lambda **_kwargs: next(operation_lookups, None)),
             get_operation=AsyncMock(return_value=None),
             record_operation=record_operation,
         ),
@@ -1559,6 +1561,52 @@ def test_http_bridge_explicit_previous_response_rejection_normalizes_error_type(
     error["error"]["type"] = "previous_response_not_found"
     error["error"].pop("code")
     assert proxy_service._http_bridge_is_explicit_previous_response_rejection(ProxyResponseError(400, error)) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("injected", [False, True])
+@pytest.mark.parametrize("mismatch", [None, "session", "parent"])
+async def test_legacy_fingerprint_lookup_preserves_injected_anchor_fences(injected: bool, mismatch: str | None) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="legacy-fingerprint")
+    session.durable_session_id = "durable-legacy"
+    state = proxy_service._WebSocketRequestState(
+        request_id="legacy-fingerprint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp-parent",
+        proxy_injected_previous_response_id=injected,
+    )
+    request_text = '{"type":"response.create","model":"gpt-5.6","previous_response_id":"resp-parent","input":[]}'
+    operation = SimpleNamespace(
+        session_id="other-session" if mismatch == "session" else session.durable_session_id,
+        parent_response_id="other-parent" if mismatch == "parent" else state.previous_response_id,
+    )
+    lookup = AsyncMock(side_effect=[None, operation])
+    service._durable_bridge = cast(Any, SimpleNamespace(get_operation_by_fingerprint=lookup))
+    found, reason = await service._http_bridge_lookup_fenced_operation(
+        session,
+        request_state=state,
+        request_fingerprint="canonical",
+        api_key_scope="scope",
+        text_data=request_text,
+    )
+    assert lookup.await_count == 2
+    assert lookup.await_args is not None
+    assert lookup.await_args.kwargs[
+        "request_fingerprint"
+    ] == http_bridge_request_submit_module.durable_bridge_operation_fingerprint(
+        api_key_scope="scope",
+        request_text=http_bridge_request_submit_module._text_without_account_installation_id(
+            request_text, sort_keys=False
+        ),
+    )
+    assert lookup.await_args.kwargs["api_key_scope"] == "scope"
+    assert found is (operation if mismatch is None else None)
+    assert reason == ("legacy_fingerprint" if mismatch is None else None)
 
 
 @pytest.mark.asyncio
@@ -2432,7 +2480,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
     )
 
     async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
-        return completed_operations.pop(0)
+        return completed_operations.pop(0) if completed_operations else None
 
     async def get_operation(**_kwargs: Any) -> None:
         return None
@@ -8982,10 +9030,12 @@ async def test_complete_transcript_recovery_preserves_state_when_rebind_fails(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unsafe_partial", [False, True])
 @pytest.mark.parametrize("cancel_stage", [None, "rollback", "fence"])
+@pytest.mark.parametrize("rollback_failure", [None, "false", "exception"])
 async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exception(
     monkeypatch: pytest.MonkeyPatch,
     unsafe_partial: bool,
     cancel_stage: str | None,
+    rollback_failure: str | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="recovery-ambiguous-rebind")
@@ -8993,9 +9043,13 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     session.durable_owner_epoch = 3
     request_state = cast(
         Any,
-        SimpleNamespace(
+        proxy_service._WebSocketRequestState(
             request_id="req-recovery-ambiguous-rebind",
             model="gpt-test",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.0,
             request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
             previous_response_id="resp-stale",
             operation_id="op-ambiguous-rebind",
@@ -9025,7 +9079,13 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
         ),
     )
     rebind_operation = AsyncMock(side_effect=RuntimeError("connection lost after commit"))
-    rollback_operation = AsyncMock(return_value=True)
+
+    def compensation_result() -> bool:
+        if rollback_failure == "exception":
+            raise RuntimeError("compensation connection lost")
+        return rollback_failure != "false"
+
+    rollback_operation = AsyncMock(side_effect=lambda **_kwargs: compensation_result())
     rollback_fence = AsyncMock()
     cancellation_started = asyncio.Event()
     release_compensation = asyncio.Event()
@@ -9033,11 +9093,13 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     async def blocked_compensation(**_kwargs: Any) -> bool:
         cancellation_started.set()
         await release_compensation.wait()
-        return True
+        return compensation_result()
 
     if cancel_stage == "rollback":
         rollback_operation.side_effect = blocked_compensation
     elif cancel_stage == "fence":
+        rollback_operation.side_effect = None
+        rollback_operation.return_value = True
         rollback_fence.side_effect = blocked_compensation
     service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(rollback_fence_operation=rollback_fence))
     if unsafe_partial:
@@ -9090,7 +9152,7 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
     )
     if cancel_stage is None:
         assert await recover(service, session, request_state) is False
-        assert request_state.operation_registered is False
+        assert request_state.operation_registered is (rollback_failure is not None)
         assert request_state.operation_rebind_required is True
     else:
         recovery_task = asyncio.create_task(recover(service, session, request_state))
@@ -9109,7 +9171,10 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
             if not recovery_task.done():
                 recovery_task.cancel()
             await asyncio.gather(recovery_task, return_exceptions=True)
-    rollback_fence.assert_awaited_once_with(operation_id="op-ambiguous-rebind", recovery_dispatch_count=0)
+    if rollback_failure is None or cancel_stage == "fence":
+        rollback_fence.assert_awaited_once_with(operation_id="op-ambiguous-rebind", recovery_dispatch_count=0)
+    else:
+        rollback_fence.assert_not_awaited()
     rollback_operation.assert_awaited_once()
     assert rollback_operation.await_args is not None
     assert rollback_operation.await_args.kwargs["restore_rebound"] is True
@@ -9122,6 +9187,39 @@ async def test_complete_transcript_recovery_rolls_back_ambiguous_rebind_exceptio
         rollback_operation.await_args.kwargs["rebind_claim_id"] == rebind_operation.await_args.kwargs["rebind_claim_id"]
     )
     assert rollback_operation.await_args.kwargs["rebind_claim_id"]
+
+    if rollback_failure is not None and not (cancel_stage == "fence" and rollback_failure == "false"):
+        assert request_state.operation_id == original_operation.operation_id
+        assert request_state.operation_registered is True
+        assert request_state.operation_rebound is True
+        assert request_state.operation_dispatched is False
+        assert request_state.operation_recovery_expected_generation == 0
+        assert request_state.operation_attempt_generation == 1
+        assert request_state.operation_rebind_claim_id == rebind_operation.await_args.kwargs["rebind_claim_id"]
+        assert request_state.fresh_upstream_request_text is None
+        assert request_state.previous_response_id == "resp-stale"
+        assert not session.pending_requests
+        first_rollback_kwargs = dict(rollback_operation.await_args.kwargs)
+        rollback_operation.side_effect = None
+        rollback_operation.return_value = True
+        rollback_fence.side_effect = None
+        monkeypatch.setattr(
+            http_bridge_request_submit_module,
+            "_service_get_settings",
+            lambda: SimpleNamespace(http_responses_session_bridge_instance_id="instance-recovery-ambiguous-rebind"),
+        )
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=False,
+            counted_in_queue=False,
+        )
+        assert rollback_operation.await_count == 2
+        assert rollback_operation.await_args.kwargs == first_rollback_kwargs
+        assert request_state.operation_registered is False
+        assert request_state.operation_rebind_claim_id is None
+        assert request_state.operation_rebind_required is True
 
 
 @pytest.mark.asyncio
@@ -9738,13 +9836,18 @@ async def test_unsafe_partial_transcript_recovery_preserves_fence_when_rebind_fa
     )
 
     assert recovered is False
-    assert request_state.operation_id is None
+    assert request_state.operation_id == ("op-rebind-fails" if ambiguous_exception else None)
     assert request_state.operation_rebind_required is True
     assert request_state.response_event_count == 1
     rebind_operation.assert_awaited_once()
     assert rebind_operation.await_args is not None
     assert rebind_operation.await_args.kwargs["allow_acknowledged"] is True
     if ambiguous_exception:
+        assert request_state.operation_registered is True
+        assert request_state.operation_rebound is True
+        assert request_state.operation_dispatched is False
+        assert request_state.operation_attempt_generation == 1
+        assert request_state.operation_rebind_claim_id == rebind_operation.await_args.kwargs["rebind_claim_id"]
         rollback_operation.assert_awaited_once()
         assert rollback_operation.await_args is not None
         assert (
@@ -9947,6 +10050,36 @@ def test_unsafe_partial_replay_keeps_sequence_numbers_monotonic() -> None:
     assert first_sequence == 8
     assert second_sequence == 9
     assert request_state.last_downstream_sequence_number == 7
+
+
+@pytest.mark.parametrize("terminal_status", [None, "completed", "in_progress"])
+@pytest.mark.parametrize("terminal_id", ["msg_1", "other-message"])
+def test_response_output_capture_terminal_echo_status_and_identity(
+    terminal_status: str | None, terminal_id: str
+) -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="terminal-echo",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    item = {"type": "message", "id": "msg_1", "status": "completed"}
+    terminal = {"type": "message", "id": terminal_id}
+    if terminal_status is not None:
+        terminal["status"] = terminal_status
+    for event_type, payload in [
+        ("response.output_item.done", {"output_index": 0, "item": item}),
+        ("response.completed", {"response": {"output": [terminal]}}),
+    ]:
+        http_bridge_upstream_events_module._record_http_bridge_response_output(
+            state, event_type=event_type, payload=cast(Any, payload)
+        )
+    valid = terminal_id == "msg_1" and terminal_status in {None, "completed"}
+    assert state.response_output_items_complete is valid
+    assert state.response_output_items_event_invalid is not valid
+    assert state.response_output_items == ([terminal] if valid else [])
 
 
 def test_response_output_capture_accepts_object_terminal_with_omitted_output() -> None:

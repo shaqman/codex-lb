@@ -19,6 +19,17 @@
 
 ## 2. Verification
 
+- [x] 2.11 Retain claim-fenced rebind ownership when compensation fails, so
+  outer pre-dispatch cleanup can retry without dispatching replacement work.
+
+- [x] 2.12 Reject transparent replay of every identity-bearing terminal error,
+  assert no reconnect for model/auth failures, and preserve zero-based wait
+  timestamps across account recovery attempts.
+
+- [x] 2.10 Probe legacy anchored fingerprints for injected and client anchors
+  under the same parent/session fences; align live terminal capture with the
+  status-tolerant, identity-preserving replay comparison.
+
 - [x] 2.9 Preserve the parent-owned migration registry when rolling back the
   rebind claim column, including production schemas with an empty registry.
 
