@@ -19,6 +19,9 @@
 
 ## 2. Verification
 
+- [x] 2.9 Preserve the parent-owned migration registry when rolling back the
+  rebind claim column, including production schemas with an empty registry.
+
 - [x] 2.8 Integrate current release timing seams into recovery claims, rollback,
   generation cleanup, and parked waits; preserve generation fencing and avoid
   duplicate terminal publication when settlement is required.

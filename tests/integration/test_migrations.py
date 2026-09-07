@@ -1794,7 +1794,8 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path):
+@pytest.mark.parametrize("empty_registry", [False, True])
+async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_registry):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
 
@@ -1805,6 +1806,9 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path):
     revision = "20260906_000000_add_http_bridge_rebind_claim"
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
     engine = create_async_engine(db_url)
+    if empty_registry:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM http_bridge_migration_object_ownership"))
 
     async def columns():
         async with engine.connect() as conn:
@@ -1822,6 +1826,16 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path):
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
         assert await columns() == before
+        async with engine.connect() as conn:
+            assert await conn.run_sync(
+                lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_migration_object_ownership")
+            )
+            assert (
+                await conn.execute(
+                    text("SELECT count(*) FROM http_bridge_migration_object_ownership WHERE revision = :revision"),
+                    {"revision": revision},
+                )
+            ).scalar_one() == 0
         await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
         assert await columns() == before | {"rebind_claim_id"}
     finally:

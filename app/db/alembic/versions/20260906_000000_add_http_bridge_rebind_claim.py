@@ -6,7 +6,6 @@ import sqlalchemy as sa
 from alembic import op
 
 from app.db.alembic.http_bridge_migration_ownership import (
-    drop_ownership_table_if_empty,
     ensure_ownership_table,
     forget_created,
     mark_created,
@@ -45,4 +44,5 @@ def downgrade() -> None:
         with op.batch_alter_table(_TABLE) as batch_op:
             batch_op.drop_column(_COLUMN)
         forget_created(bind, revision, "column", _COLUMN)
-    drop_ownership_table_if_empty(bind)
+    # The parent repair owns and requires this shared registry, even when
+    # it contains no markers. Only remove this revision's column and marker.

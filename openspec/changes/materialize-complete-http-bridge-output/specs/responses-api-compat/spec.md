@@ -55,6 +55,8 @@ identity. Compensation MUST match that identity as well as the expected
 generation and owner, so a caller whose transaction result is ambiguous cannot
 roll back a concurrent winner at the same generation. The identity MUST follow
 the replacement request into pre-dispatch cleanup.
+Downgrading the rebind-claim migration MUST preserve the shared migration
+ownership registry required by its parent revision, including an empty registry.
 
 Grouped terminal delivery MUST preserve cancellation received while awaiting
 sibling delivery barriers, including the early barrier after a successful
