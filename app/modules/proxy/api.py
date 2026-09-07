@@ -9123,7 +9123,7 @@ async def _normalize_public_responses_stream(
                 openai_error("invalid_output_item", "Responses stream produced multiple terminal events"),
                 failure_phase="upstream",
             )
-        if terminal_seen and raw_event_type in {"response.output_item.added", "response.output_item.done"}:
+        if terminal_seen and isinstance(raw_event_type, str) and raw_event_type.startswith("response."):
             # A terminal response closes the output lifecycle. Do not let a
             # late frame mutate the collected replay or leak to the client.
             contract_violation_kind = contract_violation_kind or "invalid_output_item"

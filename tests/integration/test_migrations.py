@@ -1821,6 +1821,11 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_reg
     try:
         before = await columns()
         assert "rebind_claim_id" not in before
+        async with engine.connect() as conn:
+            ownership_before = sorted(
+                tuple(row) for row in (await conn.execute(text("SELECT * FROM http_bridge_migration_object_ownership")))
+            )
+        assert bool(ownership_before) is not empty_registry
         await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
         assert await columns() == before | {"rebind_claim_id"}
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
@@ -1830,6 +1835,10 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_reg
             assert await conn.run_sync(
                 lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_migration_object_ownership")
             )
+            ownership_after = sorted(
+                tuple(row) for row in (await conn.execute(text("SELECT * FROM http_bridge_migration_object_ownership")))
+            )
+            assert ownership_after == ownership_before
             assert (
                 await conn.execute(
                     text("SELECT count(*) FROM http_bridge_migration_object_ownership WHERE revision = :revision"),

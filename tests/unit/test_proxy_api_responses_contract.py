@@ -750,6 +750,59 @@ async def test_public_responses_rejects_duplicate_terminal_events(second_type: s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enforce_sdk_contract", [False, True])
+@pytest.mark.parametrize(
+    "late_type",
+    [
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.reasoning_summary_text.delta",
+        "response.function_call_arguments.delta",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.created",
+        "response.in_progress",
+    ],
+)
+async def test_public_responses_discards_nonterminal_data_after_terminal(
+    late_type: str,
+    enforce_sdk_contract: bool,
+) -> None:
+    wire = [
+        'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","output":[]}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}\n\n',
+        "data: "
+        + json.dumps(
+            {
+                "type": late_type,
+                "response_id": "resp_1",
+                "delta": "late data",
+                "response": {"id": "resp_late", "status": "in_progress", "output": []},
+            }
+        )
+        + "\n\n",
+    ]
+    result = await proxy_api_module._collect_responses_payload(_iter_blocks(*wire))
+    body = result.model_dump(mode="json", exclude_none=True)
+    assert body["id"] == "resp_1"
+    assert body["status"] == "completed"
+    assert body["output"] == []
+    wire.extend([": keepalive\n\n", "data: [DONE]\n\n"])
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(*wire),
+            enforce_openai_sdk_contract=enforce_sdk_contract,
+        )
+    ]
+    events = [payload for block in blocks if (payload := proxy_api_module._parse_sse_payload(block))]
+    assert [event["type"] for event in events] == ["response.created", "response.completed"]
+    assert "late data" not in "".join(blocks)
+    assert ": keepalive\n\n" in blocks
+    assert blocks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_rejects_terminal_identity_mismatch() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(

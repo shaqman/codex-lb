@@ -44,6 +44,9 @@ Identity-bearing WebSocket terminal errors MUST settle without transparent
 replay or reconnect, regardless of retry error classification. Capacity-wait
 elapsed time MUST retain the first monotonic timestamp, including zero,
 across successive account-recovery waits.
+Public response streams MUST NOT forward response data after the first terminal
+event, including late content deltas and nonterminal lifecycle frames. SSE
+comments and the final `[DONE]` marker MAY still be forwarded.
 
 Security-work replay MUST clear the interrupted attempt's pending and added
 tool-call manifest entries and invalid-manifest marker before reconnecting.

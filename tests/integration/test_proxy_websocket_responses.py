@@ -9850,7 +9850,12 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
     )
 
 
-def test_backend_responses_websocket_transparently_retries_precreated_usage_limit_reached(app_instance, monkeypatch):
+@pytest.mark.parametrize("identified_failure", [False, True])
+def test_backend_responses_websocket_retries_only_identity_free_usage_limit_failures(
+    app_instance,
+    monkeypatch,
+    identified_failure,
+):
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -9859,7 +9864,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
                     {
                         "type": "response.failed",
                         "response": {
-                            "id": "resp_ws_quota_fail",
+                            **({"id": "resp_ws_quota_fail"} if identified_failure else {}),
                             "status": "failed",
                             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
                             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -9971,17 +9976,25 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
             first_event = json.loads(websocket.receive_text())
-            assert first_event["type"] == "response.created"
-            second_event = json.loads(websocket.receive_text())
+            if identified_failure:
+                assert first_event["type"] == "response.failed"
+                assert first_event["response"]["id"] == "resp_ws_quota_fail"
+            else:
+                assert first_event["type"] == "response.created"
+                second_event = json.loads(websocket.receive_text())
 
-    assert second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1", "gpt-5.1"]
     assert handled_error_codes == ["usage_limit_reached"]
     assert len(first_upstream.sent_text) == 1
-    assert len(second_upstream.sent_text) == 1
-    assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
-        json.loads(second_upstream.sent_text[0])
-    )
+    if identified_failure:
+        assert connect_models == ["gpt-5.1"]
+        assert second_upstream.sent_text == []
+    else:
+        assert second_event["type"] == "response.completed"
+        assert connect_models == ["gpt-5.1", "gpt-5.1"]
+        assert len(second_upstream.sent_text) == 1
+        assert _without_installation_metadata(
+            json.loads(first_upstream.sent_text[0])
+        ) == _without_installation_metadata(json.loads(second_upstream.sent_text[0]))
 
 
 def test_backend_responses_websocket_transparently_retries_precreated_error_usage_limit_reached(
@@ -10399,7 +10412,6 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
                     {
                         "type": "response.failed",
                         "response": {
-                            "id": "resp_ws_quota_fail_no_accounts",
                             "status": "failed",
                             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
                             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},

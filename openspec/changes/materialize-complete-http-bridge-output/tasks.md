@@ -19,6 +19,13 @@
 
 ## 2. Verification
 
+- [x] 2.13 Discard all response data after the first terminal event, including
+  late text, reasoning, content-part, tool-argument, and lifecycle frames.
+
+- [x] 2.14 Verify exact parent ownership-registry preservation on downgrade,
+  and test identity-free replay versus identity-bearing settlement through
+  the backend WebSocket endpoint.
+
 - [x] 2.11 Retain claim-fenced rebind ownership when compensation fails, so
   outer pre-dispatch cleanup can retry without dispatching replacement work.
 
