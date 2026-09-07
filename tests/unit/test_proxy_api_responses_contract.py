@@ -803,6 +803,45 @@ async def test_public_responses_discards_nonterminal_data_after_terminal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enforce_sdk_contract", [False, True])
+@pytest.mark.parametrize("after_terminal", [False, True])
+@pytest.mark.parametrize("raw_data", ["{broken", "[]", "null", "42", ""])
+async def test_source_responses_malformed_passthrough_stops_at_terminal(
+    raw_data: str,
+    after_terminal: bool,
+    enforce_sdk_contract: bool,
+) -> None:
+    raw_block = "data: " + raw_data + "\n\n"
+    terminal = 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}\n\n'
+    wire = [terminal, raw_block] if after_terminal else [raw_block, terminal]
+    wire.extend([": keepalive\n\n", "data: [DONE]\n\n"])
+    blocks = [
+        block
+        async for block in proxy_api_module._wrap_source_responses_public_stream(
+            _iter_blocks(*wire),
+            enforce_openai_sdk_contract=enforce_sdk_contract,
+        )
+    ]
+    assert (raw_block in blocks) is not after_terminal
+    events = [payload for block in blocks if (payload := proxy_api_module._parse_sse_payload(block))]
+    terminal_events = [
+        event for event in events if event.get("type") in proxy_api_module._PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES
+    ]
+    assert len(terminal_events) == 1
+    if after_terminal or not enforce_sdk_contract:
+        assert ": keepalive\n\n" in blocks
+        assert blocks[-1] == "data: [DONE]\n\n"
+        assert terminal_events[0]["type"] == "response.completed"
+    else:
+        assert terminal_events[0]["type"] == "response.failed"
+        response = terminal_events[0]["response"]
+        assert isinstance(response, dict)
+        error = response["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "invalid_json"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_rejects_terminal_identity_mismatch() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(

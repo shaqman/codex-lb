@@ -19,6 +19,9 @@
 
 ## 2. Verification
 
+- [x] 2.16 Apply the terminal boundary before source-stream malformed-data
+  passthrough, while retaining pre-terminal passthrough and SSE controls.
+
 - [x] 2.15 Omit hosted-tool bookkeeping only after completed status; reject
   unfinished hosted work in durable output and client history before replay.
 

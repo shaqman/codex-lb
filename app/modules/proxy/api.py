@@ -9085,6 +9085,10 @@ async def _normalize_public_responses_stream(
         payload = _parse_sse_payload(event_block)
         if payload is None:
             is_unparseable_data = _looks_like_sse_data_block(event_block)
+            if terminal_seen and is_unparseable_data:
+                # Source-route passthrough cannot reopen a finished response.
+                # Comments and [DONE] were handled before parsing above.
+                continue
             if is_unparseable_data:
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             if forward_unparseable_data:
