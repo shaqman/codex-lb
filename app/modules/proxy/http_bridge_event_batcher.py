@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.config.settings import get_settings
 from app.db.models import HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2, HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
@@ -45,11 +46,14 @@ class HttpBridgeOperationEventBatcher:
     """
 
     @classmethod
-    def from_settings(cls, durable_bridge: Any, settings: Any | None = None) -> "HttpBridgeOperationEventBatcher":
+    def from_settings(
+        cls, durable_bridge: Any, settings: Any | None = None, *, scheduler: Scheduler = REAL_SCHEDULER
+    ) -> "HttpBridgeOperationEventBatcher":
         """Build the event spooler from the operator-facing settings surface."""
         settings = settings or get_settings()
         return cls(
             durable_bridge,
+            scheduler=scheduler,
             max_bytes=int(
                 getattr(settings, "http_responses_session_bridge_operation_event_spool_max_bytes", 2 * 1024 * 1024)
             ),
@@ -84,10 +88,12 @@ class HttpBridgeOperationEventBatcher:
         max_pending_events: int = 2048,
         max_pending_bytes: int = 32 * 1024 * 1024,
         spool_format: str = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
+        scheduler: Scheduler = REAL_SCHEDULER,
     ) -> None:
         if spool_format not in {HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1, HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2}:
             raise ValueError("unsupported durable bridge operation spool format")
         self._durable_bridge = durable_bridge
+        self._scheduler = scheduler
         self._max_bytes = max_bytes
         self._batch_size = batch_size
         self._flush_interval_seconds = flush_interval_seconds
@@ -308,7 +314,7 @@ class HttpBridgeOperationEventBatcher:
 
         async def cleanup() -> None:
             try:
-                await asyncio.sleep(_GENERATION_FENCE_RETENTION_SECONDS)
+                await self._scheduler.sleep(_GENERATION_FENCE_RETENTION_SECONDS)
             except asyncio.CancelledError:
                 return
             async with self._flush_lock:
@@ -323,7 +329,7 @@ class HttpBridgeOperationEventBatcher:
                     self._generation_cleanup_tasks.pop(operation_id, None)
                     self._cleanup_operation_state_locked(operation_id)
 
-        self._generation_cleanup_tasks[operation_id] = asyncio.create_task(
+        self._generation_cleanup_tasks[operation_id] = self._scheduler.create_task(
             cleanup(), name=f"http-bridge-generation-cleanup-{operation_id}"
         )
 

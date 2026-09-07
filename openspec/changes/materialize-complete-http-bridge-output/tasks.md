@@ -19,6 +19,10 @@
 
 ## 2. Verification
 
+- [x] 2.8 Integrate current release timing seams into recovery claims, rollback,
+  generation cleanup, and parked waits; preserve generation fencing and avoid
+  duplicate terminal publication when settlement is required.
+
 - [x] 2.7 Recognize typeless error envelopes as terminal conflicts in public
   streaming and durable transcript materialization, with regression coverage.
 

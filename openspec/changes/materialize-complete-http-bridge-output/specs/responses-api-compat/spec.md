@@ -31,6 +31,9 @@ cannot be built.
 Pre-dispatch recovery checkpoint rollback MUST finish before native task
 cancellation propagates, and successful rollback MUST clear its in-memory
 claim before the remaining submit cleanup completes.
+Recovery tasks and parked waits MUST use their owner's injected scheduler and
+clock. Terminal settlement MUST NOT enqueue an already published terminal a
+second time.
 Ambiguous-rebind compensation for complete and unsafe-partial recovery MUST
 finish both durable rollback and event-fence restoration before propagating
 native cancellation, including repeated cancellation.

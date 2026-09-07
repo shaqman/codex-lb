@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 
 class _FakeDurableBridge:
@@ -696,6 +697,25 @@ async def test_rollback_fence_operation_restores_generation_after_rebind_rollbac
         assert durable.batches == [["replacement-after-rollback"]]
     finally:
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_generation_cleanup_uses_injected_scheduler() -> None:
+    scheduler = VirtualScheduler(VirtualClock())
+    batcher = HttpBridgeOperationEventBatcher(_FakeDurableBridge(), max_bytes=1024, scheduler=scheduler)
+    try:
+        await batcher.fence_operation(operation_id="op-virtual", recovery_dispatch_count=2)
+        assert await batcher.rollback_fence_operation(operation_id="op-virtual", recovery_dispatch_count=1)
+        await scheduler.drain()
+        assert batcher._operation_generations == {"op-virtual": 1}
+        await scheduler.advance(299.0)
+        assert batcher._operation_generations == {"op-virtual": 1}
+        await scheduler.advance(1.0)
+        assert batcher._operation_generations == {}
+        assert scheduler.owned_tasks == frozenset()
+    finally:
+        await batcher.close()
+        await scheduler.cancel_owned_tasks()
 
 
 @pytest.mark.asyncio
